@@ -1,0 +1,42 @@
+name: PR Labeler (Reusable)
+
+# Reusable workflow for size/risk/checkbox labeling. Permissions are inherited
+# from the caller (intentionally not declared here -- declaring them would
+# override the caller's grant and produce "Resource not accessible" failures).
+# Callers must grant: pull-requests: write.
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        description: 'PR number, "all" for full backfill, or empty for event-driven'
+        type: string
+        required: false
+        default: ''
+      dry_run:
+        description: 'Log labels without applying'
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout reusable workflow scripts
+        uses: actions/checkout@v4
+        with:
+          repository: trufflesecurity/.github
+          ref: main
+          path: org-github
+          sparse-checkout: |
+            .github/scripts
+
+      - name: Apply labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python3 org-github/.github/scripts/pr_labeler.py
