@@ -42,6 +42,7 @@ RISK_MAP = {
 # Conservative fallback for unmapped Bugbot levels (e.g., "Critical", "Minimal").
 RISK_FALLBACK = "risk/high"
 
+
 # Match a markdown checkbox followed (with whitespace and optional bold/markdown
 # punctuation) by a target keyword. The `[xX ]` part captures the state.
 def checkbox_regex(keyword: str) -> re.Pattern[str]:
@@ -62,6 +63,7 @@ COMPLEXITY_REGEX = checkbox_regex("high complexity")
 @dataclass
 class LabelPlan:
     """Planned label changes for a single PR."""
+
     pr_number: int
     add: list[str] = field(default_factory=list)
     remove: list[str] = field(default_factory=list)
@@ -74,7 +76,11 @@ class LabelPlan:
         for label in self.remove:
             parts.append(f"-{label}")
         parts.extend(self.notes)
-        return f"PR #{self.pr_number} " + " ".join(parts) if parts else f"PR #{self.pr_number} (no changes)"
+        return (
+            f"PR #{self.pr_number} " + " ".join(parts)
+            if parts
+            else f"PR #{self.pr_number} (no changes)"
+        )
 
 
 def gh(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -141,7 +147,9 @@ def risk_from_body(body: str, plan: LabelPlan) -> str | None:
     level = match.group(1).lower()
     label = RISK_MAP.get(level)
     if label is None:
-        plan.notes.append(f"[warn: unmapped Bugbot risk '{match.group(1)}' -> {RISK_FALLBACK}]")
+        plan.notes.append(
+            f"[warn: unmapped Bugbot risk '{match.group(1)}' -> {RISK_FALLBACK}]"
+        )
         return RISK_FALLBACK
     return label
 

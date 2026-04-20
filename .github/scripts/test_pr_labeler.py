@@ -15,6 +15,7 @@ import pr_labeler  # noqa: E402
 
 # ---- size_bucket -----------------------------------------------------------
 
+
 class TestSizeBucket:
     def test_zero_or_negative_returns_none(self):
         assert pr_labeler.size_bucket(0) is None
@@ -42,6 +43,7 @@ class TestSizeBucket:
 
 
 # ---- risk_from_body --------------------------------------------------------
+
 
 def _plan() -> pr_labeler.LabelPlan:
     return pr_labeler.LabelPlan(pr_number=1)
@@ -88,6 +90,7 @@ class TestRiskFromBody:
 
 # ---- checkbox_state --------------------------------------------------------
 
+
 class TestCheckboxState:
     def test_urgent_checked(self):
         body = "- [x] **Urgent**: needs same-day review"
@@ -127,6 +130,7 @@ class TestCheckboxState:
 
 
 # ---- reconcile -------------------------------------------------------------
+
 
 def _pr(*, additions=0, deletions=0, body="", labels=()):
     return {
@@ -206,6 +210,7 @@ class TestReconcile:
 
 
 # ---- determine_targets ------------------------------------------------------
+
 
 class TestDetermineTargets:
     def test_explicit_number(self, monkeypatch):

@@ -49,7 +49,10 @@ def main() -> int:
     labels_path = Path(os.environ.get("LABELS_FILE", "labels.yml"))
     labels = yaml.safe_load(labels_path.read_text())
     if not isinstance(labels, list):
-        print(f"Expected a YAML list in {labels_path}, got {type(labels).__name__}", file=sys.stderr)
+        print(
+            f"Expected a YAML list in {labels_path}, got {type(labels).__name__}",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"Syncing {len(labels)} labels to {repo} from {labels_path}")
