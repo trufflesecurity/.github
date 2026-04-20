@@ -4,7 +4,7 @@
 - [ ] **Urgent**: needs same-day review
 - [ ] **High complexity**: non-obvious logic, needs careful review
 - **Estimated review time**: <!-- 15 min / 30 min / 1 hr+ -->
-- **Key files to focus on**: <!-- e.g., api/pkg/services/jobs.go -->
+- **Key files to focus on**: <!-- e.g., src/path/to/file.ext -->
 - **Areas you're unsure about**: <!-- Where you'd appreciate extra scrutiny -->
 
 <!-- For large or complex PRs (XL size, high complexity, or spanning multiple -->

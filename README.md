@@ -26,14 +26,15 @@ Org-wide defaults and shared automation for TruffleHog repositories.
 ## How to add or change a label
 
 Edit `labels.yml`. The next scheduled run of each consumer's `Sync Labels`
-workflow propagates the change (midnight UTC daily). To propagate immediately:
+workflow propagates the change (midnight UTC daily). To propagate immediately,
+trigger the workflow on each consumer repo via:
 
 ```bash
-for repo in thog slack-integration-service infrastructure driftwood-server \
-            integrations interservice-contracts helm-charts; do
-  gh workflow run sync-labels.yml --repo trufflesecurity/$repo
-done
+gh workflow run sync-labels.yml --repo trufflesecurity/<repo>
 ```
+
+The current list of consumer repos is maintained in our internal rollout doc
+(see the PR Labeling & Hygiene plan).
 
 Also update the org-level **Settings > Repository defaults > Repository labels**
 list so brand-new repos get the same set on day one.
