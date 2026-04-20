@@ -1,0 +1,35 @@
+# Standard label taxonomy. Synced via reusable workflow.
+
+- name: size/XS
+  color: c2e0ff
+  description: 1-10 lines changed
+- name: size/S
+  color: 85c1ff
+  description: 11-50 lines changed
+- name: size/M
+  color: 4a90d9
+  description: 51-250 lines changed
+- name: size/L
+  color: 2563a0
+  description: 251-999 lines changed
+- name: size/XL
+  color: 0e3d6b
+  description: 1000+ lines changed
+- name: risk/low
+  color: 2da44e
+  description: Bugbot risk assessment -- low
+- name: risk/medium
+  color: d29922
+  description: Bugbot risk assessment -- medium
+- name: risk/high
+  color: cf222e
+  description: Bugbot risk assessment -- high
+- name: review/urgent
+  color: e01e5a
+  description: Needs same-day review (author-declared)
+- name: status/stale
+  color: 8b949e
+  description: No activity for 14+ days (auto-applied)
+- name: complexity/high
+  color: 8957e5
+  description: Non-obvious logic, careful review (author-declared)
