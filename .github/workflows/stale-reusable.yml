@@ -1,0 +1,61 @@
+name: Stale PRs (Reusable)
+
+# Reusable wrapper around actions/stale. Permissions are inherited from the
+# caller (do not declare here). Callers must grant:
+#   pull-requests: write
+#   issues: write   (labels are an issue resource in GitHub's perm model)
+
+on:
+  workflow_call:
+    inputs:
+      days-before-stale:
+        type: number
+        required: false
+        default: 14
+      days-before-close:
+        type: number
+        required: false
+        default: 16
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          # PR thresholds
+          days-before-pr-stale: ${{ inputs.days-before-stale }}
+          days-before-pr-close: ${{ inputs.days-before-close }}
+
+          # We do not stale issues at all -- this workflow is PR-only.
+          # Without -1 the action would also start staling issues across all
+          # consumer repos.
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+
+          # Our taxonomy uses status/stale rather than the action's default Stale.
+          stale-pr-label: status/stale
+
+          # Author-declared urgency is exempt from staling.
+          exempt-pr-labels: review/urgent
+
+          # Drafts are work-in-progress and never stale.
+          exempt-draft-pr: true
+
+          # Auto-remove status/stale when activity resumes (default true; explicit).
+          remove-stale-when-updated: true
+
+          # Never delete branches when closing.
+          delete-branch: false
+
+          # Throttle to spread waves over multiple days (default 30; explicit).
+          operations-per-run: 30
+
+          stale-pr-message: >
+            This PR has been inactive for ${{ inputs.days-before-stale }} days.
+            To keep it active, push a commit, leave a comment, check the
+            "Urgent" box in the PR description, or convert to draft.
+            Otherwise it will auto-close in ${{ inputs.days-before-close }} days.
+
+          close-pr-message: >
+            Closing due to inactivity. Reopen if work resumes.
