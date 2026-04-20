@@ -1,0 +1,23 @@
+name: Test scripts
+
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/**'
+      - '.github/workflows/test-scripts.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/scripts/**'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest pyyaml
+      - run: python -m pytest .github/scripts -v

@@ -1,0 +1,33 @@
+name: Label Sync (Reusable)
+
+# Reusable workflow that syncs labels from this repo's labels.yml into the
+# caller repo. Idempotent and additive -- legacy labels not in labels.yml are
+# left alone. Permissions are inherited from the caller (do not declare here).
+# Callers must grant: issues: write.
+
+on:
+  workflow_call:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout label definitions
+        uses: actions/checkout@v4
+        with:
+          repository: trufflesecurity/.github
+          ref: main
+          path: org-github
+          sparse-checkout: |
+            labels.yml
+            .github/scripts/label_sync.py
+
+      - name: Install PyYAML
+        run: pip install --quiet pyyaml
+
+      - name: Sync labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LABELS_FILE: org-github/labels.yml
+        run: python3 org-github/.github/scripts/label_sync.py
