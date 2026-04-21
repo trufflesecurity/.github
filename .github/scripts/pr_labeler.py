@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PR labeler: compute size, risk, and checkbox labels for one or more PRs.
+"""PR labeler: compute size, risk, and template-field labels for one or more PRs.
 
 Inputs come from environment variables set by the calling workflow:
   GITHUB_REPOSITORY  e.g. "owner/repo" (always set on Actions)
@@ -11,7 +11,13 @@ The script processes each PR by:
   1. Fetching additions, deletions, body, and current labels from the GitHub API.
   2. Computing the size bucket from additions+deletions.
   3. Parsing the Bugbot CURSOR_SUMMARY block for a risk level.
-  4. Parsing the PR template checkboxes for `urgent` and `high complexity`.
+  4. Parsing the PR template fields for `urgent` and `high complexity`.
+     Two formats are supported:
+       - Current: ``- **Urgent** (...): yes`` / ``: no``
+       - Legacy:  ``- [x] **Urgent** ...`` / ``- [ ] **Urgent** ...``
+     The current format is preferred; the legacy format is matched as a
+     fallback so PRs opened before the template change keep working until
+     the queue rolls over.
   5. Reconciling with current labels and applying adds/removes via `gh pr edit`.
 
 For backfill mode (PR_NUMBER == "all"), per-PR failures are logged but do not
@@ -32,6 +38,9 @@ RISK_LABELS = ["risk/low", "risk/medium", "risk/high"]
 URGENT_LABEL = "review/urgent"
 COMPLEXITY_LABEL = "complexity/high"
 
+URGENT_KEYWORD = "urgent"
+COMPLEXITY_KEYWORD = "high complexity"
+
 CURSOR_SUMMARY_MARKER = "<!-- CURSOR_SUMMARY -->"
 RISK_REGEX = re.compile(r"\*\*(\w+)\s+Risk\*\*", re.IGNORECASE)
 RISK_MAP = {
@@ -43,21 +52,44 @@ RISK_MAP = {
 RISK_FALLBACK = "risk/high"
 
 
-# Match a markdown checkbox followed (with whitespace and optional bold/markdown
-# punctuation) by a target keyword. The `[xX ]` part captures the state.
+def yesno_regex(keyword: str) -> re.Pattern[str]:
+    """Match the current template format and capture ``yes`` or ``no``.
+
+    Examples that match (state captured):
+      - **Urgent** (needs same-day review): yes
+      - **High complexity** (non-obvious logic, careful review): no
+      * **urgent**: YES
+
+    The bullet must appear at the start of a line so that an inline ``*``
+    from markdown bold syntax (e.g. ``**Urgent**`` inside a legacy checkbox
+    line ``- [x] **Urgent**: no further action``) cannot be mistaken for a
+    list bullet -- otherwise ``: no`` from the description would be captured
+    and flip a checked legacy box from ``on`` to ``off``.
+    """
+    return re.compile(
+        rf"^\s*[-*]\s*[*_`]*\s*{re.escape(keyword)}\b[^:\n]*:\s*(yes|no)\b",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+
 def checkbox_regex(keyword: str) -> re.Pattern[str]:
-    # Examples that should match (state captured):
-    #   - [x] **Urgent**: needs same-day review
-    #   - [ ] **High complexity**: ...
-    #   * [X] urgent
+    """Match the legacy template format and capture the checkbox state.
+
+    Examples that match (state captured):
+      - [x] **Urgent**: needs same-day review
+      - [ ] **High complexity**: ...
+      * [X] urgent
+    """
     return re.compile(
         rf"[-*]\s*\[\s*([xX ])\s*\]\s*[*_`]*\s*{re.escape(keyword)}",
         re.IGNORECASE,
     )
 
 
-URGENT_REGEX = checkbox_regex("urgent")
-COMPLEXITY_REGEX = checkbox_regex("high complexity")
+URGENT_YESNO_REGEX = yesno_regex(URGENT_KEYWORD)
+COMPLEXITY_YESNO_REGEX = yesno_regex(COMPLEXITY_KEYWORD)
+URGENT_CHECKBOX_REGEX = checkbox_regex(URGENT_KEYWORD)
+COMPLEXITY_CHECKBOX_REGEX = checkbox_regex(COMPLEXITY_KEYWORD)
 
 
 @dataclass
@@ -154,12 +186,36 @@ def risk_from_body(body: str, plan: LabelPlan) -> str | None:
     return label
 
 
-def checkbox_state(body: str, regex: re.Pattern[str]) -> str | None:
-    """Return 'on', 'off', or None (not present)."""
-    match = regex.search(body)
-    if not match:
-        return None
-    return "on" if match.group(1).lower() == "x" else "off"
+def field_state(
+    body: str,
+    *,
+    yesno: re.Pattern[str],
+    checkbox: re.Pattern[str],
+) -> str | None:
+    """Return ``'on'``, ``'off'``, or ``None`` for a template field.
+
+    Tries the current ``**Field**: yes/no`` syntax first and falls back to the
+    legacy ``- [x] **Field**`` syntax. The legacy regex is retained so PRs
+    opened before the template change keep being labeled correctly until the
+    queue rolls over (~2 weeks). It will be removed in a follow-up.
+
+    Defense in depth: skip any yes/no match whose enclosing line is itself a
+    legacy checkbox line. The yes/no regex is anchored to the start of a
+    line, so this shouldn't happen today, but a stray ``: no`` in a
+    checkbox description must never preempt the checkbox result and flip a
+    checked ``[x]`` from ``on`` to ``off``.
+    """
+    for match in yesno.finditer(body):
+        line_start = body.rfind("\n", 0, match.start()) + 1
+        newline = body.find("\n", match.end())
+        line = body[line_start : newline if newline != -1 else len(body)]
+        if checkbox.search(line):
+            continue
+        return "on" if match.group(1).lower() == "yes" else "off"
+    match = checkbox.search(body)
+    if match:
+        return "on" if match.group(1).lower() == "x" else "off"
+    return None
 
 
 def reconcile(
@@ -192,12 +248,12 @@ def reconcile(
             # strip a manually-set risk label just because Bugbot didn't comment.
             plan.remove.append(label)
 
-    # Checkboxes: three-state (on/off/absent).
-    for regex, label in [
-        (URGENT_REGEX, URGENT_LABEL),
-        (COMPLEXITY_REGEX, COMPLEXITY_LABEL),
+    # Template fields: three-state (on/off/absent).
+    for yesno_re, checkbox_re, label in [
+        (URGENT_YESNO_REGEX, URGENT_CHECKBOX_REGEX, URGENT_LABEL),
+        (COMPLEXITY_YESNO_REGEX, COMPLEXITY_CHECKBOX_REGEX, COMPLEXITY_LABEL),
     ]:
-        state = checkbox_state(body, regex)
+        state = field_state(body, yesno=yesno_re, checkbox=checkbox_re)
         if state == "on" and label not in current_labels:
             plan.add.append(label)
         elif state == "off" and label in current_labels:
