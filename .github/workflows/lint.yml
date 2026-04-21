@@ -14,12 +14,12 @@ jobs:
     name: Python (ruff)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/ruff-action@v3
+      - uses: actions/checkout@v6
+      - uses: astral-sh/ruff-action@v4
         with:
           src: '.github/scripts'
           args: 'check'
-      - uses: astral-sh/ruff-action@v3
+      - uses: astral-sh/ruff-action@v4
         with:
           src: '.github/scripts'
           args: 'format --check'
@@ -28,7 +28,7 @@ jobs:
     name: Workflows (actionlint)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Run actionlint
         run: |
           bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
