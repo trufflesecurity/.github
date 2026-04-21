@@ -59,10 +59,16 @@ def yesno_regex(keyword: str) -> re.Pattern[str]:
       - **Urgent** (needs same-day review): yes
       - **High complexity** (non-obvious logic, careful review): no
       * **urgent**: YES
+
+    The bullet must appear at the start of a line so that an inline ``*``
+    from markdown bold syntax (e.g. ``**Urgent**`` inside a legacy checkbox
+    line ``- [x] **Urgent**: no further action``) cannot be mistaken for a
+    list bullet -- otherwise ``: no`` from the description would be captured
+    and flip a checked legacy box from ``on`` to ``off``.
     """
     return re.compile(
-        rf"[-*]\s*[*_`]*\s*{re.escape(keyword)}\b[^:\n]*:\s*(yes|no)\b",
-        re.IGNORECASE,
+        rf"^\s*[-*]\s*[*_`]*\s*{re.escape(keyword)}\b[^:\n]*:\s*(yes|no)\b",
+        re.IGNORECASE | re.MULTILINE,
     )
 
 
@@ -192,9 +198,19 @@ def field_state(
     legacy ``- [x] **Field**`` syntax. The legacy regex is retained so PRs
     opened before the template change keep being labeled correctly until the
     queue rolls over (~2 weeks). It will be removed in a follow-up.
+
+    Defense in depth: skip any yes/no match whose enclosing line is itself a
+    legacy checkbox line. The yes/no regex is anchored to the start of a
+    line, so this shouldn't happen today, but a stray ``: no`` in a
+    checkbox description must never preempt the checkbox result and flip a
+    checked ``[x]`` from ``on`` to ``off``.
     """
-    match = yesno.search(body)
-    if match:
+    for match in yesno.finditer(body):
+        line_start = body.rfind("\n", 0, match.start()) + 1
+        newline = body.find("\n", match.end())
+        line = body[line_start : newline if newline != -1 else len(body)]
+        if checkbox.search(line):
+            continue
         return "on" if match.group(1).lower() == "yes" else "off"
     match = checkbox.search(body)
     if match:

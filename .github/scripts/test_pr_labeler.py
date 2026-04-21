@@ -221,6 +221,55 @@ class TestFieldStatePrecedence:
         )
         assert _urgent_state(body) == "off"
 
+    def test_legacy_checked_with_yesno_in_description_is_on(self):
+        # Regression: the yes/no regex must not treat the ``*`` from
+        # ``**Urgent**`` inside a legacy checkbox line as a list bullet,
+        # which would let it capture ``no`` from the description and
+        # incorrectly flip a checked box from ``on`` to ``off``.
+        body = "- [x] **Urgent**: no further action"
+        assert _urgent_state(body) == "on"
+
+    def test_legacy_checked_with_yes_in_description_is_on(self):
+        body = "- [x] **Urgent**: yes please review today"
+        assert _urgent_state(body) == "on"
+
+    def test_legacy_unchecked_with_yes_in_description_is_off(self):
+        body = "- [ ] **Urgent**: yes please review today"
+        assert _urgent_state(body) == "off"
+
+    def test_field_state_ignores_yesno_match_on_checkbox_line(self):
+        # Defense in depth: even if the yes/no regex regresses to the old
+        # unanchored form and matches inside a legacy checkbox line,
+        # ``field_state`` must drop that match and use the checkbox.
+        import re as _re
+
+        unanchored = _re.compile(
+            r"[-*]\s*[*_`]*\s*urgent\b[^:\n]*:\s*(yes|no)\b",
+            _re.IGNORECASE,
+        )
+        body = "- [x] **Urgent**: no further action"
+        # Sanity: the regressed regex really would mis-capture "no".
+        assert unanchored.search(body).group(1) == "no"
+        # field_state must still return "on" via the checkbox fallback.
+        assert (
+            pr_labeler.field_state(
+                body,
+                yesno=unanchored,
+                checkbox=pr_labeler.URGENT_CHECKBOX_REGEX,
+            )
+            == "on"
+        )
+
+    def test_field_state_keeps_yesno_on_separate_line_from_checkbox(self):
+        # The defensive filter must only ignore yes/no matches whose
+        # enclosing line is itself a checkbox line. A real yes/no entry
+        # on its own line still wins over an unrelated legacy line.
+        body = (
+            "- [x] **Urgent**: stale legacy line\n"
+            "- **Urgent** (needs same-day review): no"
+        )
+        assert _urgent_state(body) == "off"
+
 
 # ---- reconcile -------------------------------------------------------------
 
