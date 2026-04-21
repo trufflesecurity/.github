@@ -8,6 +8,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 import pr_labeler  # noqa: E402
@@ -88,45 +90,136 @@ class TestRiskFromBody:
         assert pr_labeler.risk_from_body(body, _plan()) == "risk/high"
 
 
-# ---- checkbox_state --------------------------------------------------------
+# ---- field_state -----------------------------------------------------------
 
 
-class TestCheckboxState:
+def _urgent_state(body: str) -> str | None:
+    return pr_labeler.field_state(
+        body,
+        yesno=pr_labeler.URGENT_YESNO_REGEX,
+        checkbox=pr_labeler.URGENT_CHECKBOX_REGEX,
+    )
+
+
+def _complexity_state(body: str) -> str | None:
+    return pr_labeler.field_state(
+        body,
+        yesno=pr_labeler.COMPLEXITY_YESNO_REGEX,
+        checkbox=pr_labeler.COMPLEXITY_CHECKBOX_REGEX,
+    )
+
+
+class TestFieldStateYesNo:
+    """Current template format: ``- **Field** (...): yes|no``."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "- **Urgent** (needs same-day review): yes",
+            "- **Urgent**: yes",
+            "* **urgent**: YES",
+            "- **Urgent** (needs same-day review): yes, plus extra context",
+            "-   **Urgent**   (needs same-day review)   :   yes",
+        ],
+    )
+    def test_urgent_yes_variants(self, body):
+        assert _urgent_state(body) == "on"
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "- **Urgent** (needs same-day review): no",
+            "- **Urgent**: no",
+            "* **urgent**: NO",
+        ],
+    )
+    def test_urgent_no_variants(self, body):
+        assert _urgent_state(body) == "off"
+
+    def test_complexity_yes(self):
+        body = "- **High complexity** (non-obvious logic, careful review): yes"
+        assert _complexity_state(body) == "on"
+
+    def test_complexity_no(self):
+        body = "- **High complexity** (non-obvious logic, careful review): no"
+        assert _complexity_state(body) == "off"
+
+    def test_value_must_be_yes_or_no(self):
+        # "maybe" is not yes/no; field is treated as absent.
+        body = "- **Urgent**: maybe"
+        assert _urgent_state(body) is None
+
+    def test_value_word_boundary(self):
+        # "nothing" must not be parsed as "no".
+        body = "- **Urgent**: nothing here"
+        assert _urgent_state(body) is None
+
+    def test_yes_or_no_inside_parenthetical_is_ignored(self):
+        # The inline "yes or no" hint inside the parenthetical is descriptive;
+        # only the value after the colon counts.
+        body = "- **Urgent** (answer yes or no): no"
+        assert _urgent_state(body) == "off"
+
+    def test_absent_returns_none(self):
+        assert _urgent_state("body with no template") is None
+
+
+class TestFieldStateLegacyCheckbox:
+    """Legacy template format: ``- [x] **Field**`` (in-flight PRs)."""
+
     def test_urgent_checked(self):
         body = "- [x] **Urgent**: needs same-day review"
-        assert pr_labeler.checkbox_state(body, pr_labeler.URGENT_REGEX) == "on"
+        assert _urgent_state(body) == "on"
 
     def test_urgent_unchecked(self):
         body = "- [ ] **Urgent**: needs same-day review"
-        assert pr_labeler.checkbox_state(body, pr_labeler.URGENT_REGEX) == "off"
+        assert _urgent_state(body) == "off"
 
     def test_urgent_capital_x(self):
         body = "- [X] **Urgent**"
-        assert pr_labeler.checkbox_state(body, pr_labeler.URGENT_REGEX) == "on"
+        assert _urgent_state(body) == "on"
 
     def test_urgent_absent(self):
         body = "no template here"
-        assert pr_labeler.checkbox_state(body, pr_labeler.URGENT_REGEX) is None
+        assert _urgent_state(body) is None
 
     def test_urgent_without_bold(self):
         body = "- [x] urgent: needs same-day review"
-        assert pr_labeler.checkbox_state(body, pr_labeler.URGENT_REGEX) == "on"
+        assert _urgent_state(body) == "on"
 
     def test_complexity_checked(self):
         body = "- [x] **High complexity**: non-obvious logic"
-        assert pr_labeler.checkbox_state(body, pr_labeler.COMPLEXITY_REGEX) == "on"
+        assert _complexity_state(body) == "on"
 
     def test_complexity_unchecked(self):
         body = "- [ ] **High complexity**: non-obvious logic"
-        assert pr_labeler.checkbox_state(body, pr_labeler.COMPLEXITY_REGEX) == "off"
+        assert _complexity_state(body) == "off"
 
     def test_extra_whitespace(self):
         body = "-   [ x ]   **Urgent**: needs same-day review"
-        assert pr_labeler.checkbox_state(body, pr_labeler.URGENT_REGEX) == "on"
+        assert _urgent_state(body) == "on"
 
     def test_asterisk_bullet(self):
         body = "* [x] urgent"
-        assert pr_labeler.checkbox_state(body, pr_labeler.URGENT_REGEX) == "on"
+        assert _urgent_state(body) == "on"
+
+
+class TestFieldStatePrecedence:
+    """When both formats appear in the same body, yes/no wins."""
+
+    def test_yesno_wins_over_legacy_checkbox(self):
+        body = (
+            "- [ ] **Urgent**: stale legacy line\n"
+            "- **Urgent** (needs same-day review): yes"
+        )
+        assert _urgent_state(body) == "on"
+
+    def test_yesno_no_wins_over_legacy_checked(self):
+        body = (
+            "- [x] **Urgent**: stale legacy line\n"
+            "- **Urgent** (needs same-day review): no"
+        )
+        assert _urgent_state(body) == "off"
 
 
 # ---- reconcile -------------------------------------------------------------
@@ -185,13 +278,28 @@ class TestReconcile:
         assert "risk/low" in plan.add
         assert "risk/high" in plan.remove
 
-    def test_urgent_checkbox_on_adds_label(self):
+    def test_urgent_yesno_yes_adds_label(self):
+        plan = _plan()
+        body = "- **Urgent** (needs same-day review): yes"
+        pr_labeler.reconcile(_pr(additions=5, body=body), plan=plan)
+        assert pr_labeler.URGENT_LABEL in plan.add
+
+    def test_urgent_yesno_no_removes_label(self):
+        plan = _plan()
+        body = "- **Urgent** (needs same-day review): no"
+        pr_labeler.reconcile(
+            _pr(additions=5, body=body, labels=(pr_labeler.URGENT_LABEL,)),
+            plan=plan,
+        )
+        assert pr_labeler.URGENT_LABEL in plan.remove
+
+    def test_urgent_legacy_checked_adds_label(self):
         plan = _plan()
         body = "- [x] **Urgent**: needs same-day review"
         pr_labeler.reconcile(_pr(additions=5, body=body), plan=plan)
         assert pr_labeler.URGENT_LABEL in plan.add
 
-    def test_urgent_checkbox_off_removes_label(self):
+    def test_urgent_legacy_unchecked_removes_label(self):
         plan = _plan()
         body = "- [ ] **Urgent**: needs same-day review"
         pr_labeler.reconcile(
@@ -200,13 +308,19 @@ class TestReconcile:
         )
         assert pr_labeler.URGENT_LABEL in plan.remove
 
-    def test_urgent_checkbox_absent_leaves_manual_label(self):
+    def test_urgent_absent_leaves_manual_label(self):
         plan = _plan()
         pr_labeler.reconcile(
             _pr(additions=5, body="no template", labels=(pr_labeler.URGENT_LABEL,)),
             plan=plan,
         )
         assert pr_labeler.URGENT_LABEL not in plan.remove
+
+    def test_complexity_yesno_yes_adds_label(self):
+        plan = _plan()
+        body = "- **High complexity** (non-obvious logic, careful review): yes"
+        pr_labeler.reconcile(_pr(additions=5, body=body), plan=plan)
+        assert pr_labeler.COMPLEXITY_LABEL in plan.add
 
 
 # ---- determine_targets ------------------------------------------------------
