@@ -27,7 +27,7 @@ jobs:
       # caller's GITHUB_TOKEN (which is scoped to the caller, not this repo)
       # can check them out without a PAT or GitHub App credential.
       - name: Checkout shared scripts
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: trufflesecurity/.github
           ref: main
