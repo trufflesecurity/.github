@@ -53,8 +53,8 @@ jobs:
 
           stale-pr-message: >
             This PR has been inactive for ${{ inputs.days-before-stale }} days.
-            To keep it active, push a commit, leave a comment, check the
-            "Urgent" box in the PR description, or convert to draft.
+            To keep it active, push a commit, leave a comment, add the
+            `review/urgent` label, or convert to draft.
             Otherwise it will auto-close in ${{ inputs.days-before-close }} days.
 
           close-pr-message: >
