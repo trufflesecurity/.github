@@ -48,8 +48,12 @@ jobs:
           # Never delete branches when closing.
           delete-branch: false
 
-          # Throttle to spread waves over multiple days (default 30; explicit).
-          operations-per-run: 30
+          # API call budget per run. The default (30) is too low for repos
+          # with 100+ open PRs -- the action processes newest-first and never
+          # reaches older PRs before exhausting the budget. 200 is enough to
+          # mark and close the full backlog in a single run for any current
+          # consumer repo, while staying well within GitHub's rate limits.
+          operations-per-run: 200
 
           stale-pr-message: >
             This PR has been inactive for ${{ inputs.days-before-stale }} days.
