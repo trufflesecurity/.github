@@ -28,7 +28,7 @@
   "packageRules": [
     {
       "description": "Group all GitHub Actions updates into a single PR",
-      "matchDatasources": ["github-actions"],
+      "matchManagers": ["github-actions"],
       "groupName": "github-actions"
     }
   ]
