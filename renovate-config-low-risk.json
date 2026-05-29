@@ -1,0 +1,35 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>trufflesecurity/.github:renovate-config"],
+  "packageRules": [
+    {
+      "description": "Automerge minor/patch for Go dependencies",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "matchCategories": ["golang"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge all GitHub Actions updates",
+      "matchManagers": ["github-actions"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge minor/patch for JS dependencies (npm/yarn/pnpm)",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "matchCategories": ["js"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge minor/patch for Docker dependencies",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "matchCategories": ["docker"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge minor/patch for Python dependencies",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "matchCategories": ["python"],
+      "automerge": true
+    }
+  ]
+}
