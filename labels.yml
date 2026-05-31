@@ -33,3 +33,24 @@
 - name: complexity/high
   color: 8957e5
   description: Non-obvious logic, careful review (author-declared)
+- name: domain/scanning
+  color: 0d9488
+  description: PR touches code owned by Scanning
+- name: domain/findings
+  color: 14b8a6
+  description: PR touches code owned by Findings
+- name: domain/integrations
+  color: 2dd4bf
+  description: PR touches code owned by Integrations
+- name: domain/platform
+  color: 5eead4
+  description: PR touches code owned by Platform
+- name: domain/frontend
+  color: 99f6e4
+  description: PR touches code owned by Frontend
+- name: domain/infra
+  color: 0f766e
+  description: PR touches code owned by Infra
+- name: domain/database
+  color: 115e59
+  description: PR touches code owned by Database

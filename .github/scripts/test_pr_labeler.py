@@ -390,3 +390,169 @@ class TestDetermineTargets:
 
     def test_no_input_returns_empty(self):
         assert pr_labeler.determine_targets("repo", "", "") == []
+
+
+# ---- parse_codeowners -------------------------------------------------------
+
+
+class TestParseCodeowners:
+    def test_simple_catch_all(self):
+        rules = pr_labeler.parse_codeowners("* @org/scanning")
+        assert rules == [("*", ["scanning"])]
+
+    def test_multiple_owners(self):
+        rules = pr_labeler.parse_codeowners(
+            "proto/ @org/integrations @org/scanning"
+        )
+        assert rules == [("proto/", ["integrations", "scanning"])]
+
+    def test_skips_comments_and_blanks(self):
+        text = "# comment\n\n* @org/eng-leads\n  # indented comment\n/web/ @org/findings"
+        rules = pr_labeler.parse_codeowners(text)
+        assert len(rules) == 2
+        assert rules[0] == ("*", ["eng-leads"])
+        assert rules[1] == ("/web/", ["findings"])
+
+    def test_inline_comment_stripped(self):
+        rules = pr_labeler.parse_codeowners("/vendor/ @org/platform # vendored deps")
+        assert rules == [("/vendor/", ["platform"])]
+
+    def test_owner_case_normalized(self):
+        rules = pr_labeler.parse_codeowners("* @org/Integrations")
+        assert rules[0][1] == ["integrations"]
+
+
+# ---- _codeowners_match ------------------------------------------------------
+
+
+class TestCodeownersMatch:
+    def test_star_matches_everything(self):
+        assert pr_labeler._codeowners_match("*", "any/file.py")
+        assert pr_labeler._codeowners_match("*", "root.go")
+
+    def test_anchored_dir(self):
+        assert pr_labeler._codeowners_match("/web/", "web/app.py")
+        assert pr_labeler._codeowners_match("/web/", "web/sub/deep.py")
+        assert not pr_labeler._codeowners_match("/web/", "other/web/app.py")
+
+    def test_unanchored_dir_with_internal_slash(self):
+        # Pattern has internal slash -> implicitly anchored
+        assert pr_labeler._codeowners_match("pkg/engine/", "pkg/engine/scan.go")
+        assert not pr_labeler._codeowners_match("pkg/engine/", "other/pkg/engine/x.go")
+
+    def test_anchored_glob(self):
+        assert pr_labeler._codeowners_match("/web/webapi/views/*.py", "web/webapi/views/foo.py")
+        assert not pr_labeler._codeowners_match(
+            "/web/webapi/views/*.py", "web/webapi/views/sub/foo.py"
+        )
+
+    def test_unanchored_basename(self):
+        assert pr_labeler._codeowners_match("go.sum", "go.sum")
+        assert pr_labeler._codeowners_match("go.sum", "vendor/somelib/go.sum")
+
+    def test_basename_glob(self):
+        assert pr_labeler._codeowners_match("*.js", "frontend/app.js")
+        assert pr_labeler._codeowners_match("*.js", "app.js")
+        assert not pr_labeler._codeowners_match("*.js", "app.jsx")
+
+    def test_deep_anchored_path(self):
+        assert pr_labeler._codeowners_match(
+            "/vendor/github.com/trufflesecurity/smallfetch/",
+            "vendor/github.com/trufflesecurity/smallfetch/client.go",
+        )
+        assert not pr_labeler._codeowners_match(
+            "/vendor/github.com/trufflesecurity/smallfetch/",
+            "other/vendor/github.com/trufflesecurity/smallfetch/client.go",
+        )
+
+
+# ---- domains_for_pr ---------------------------------------------------------
+
+
+SAMPLE_CODEOWNERS = """\
+* @org/eng-leads
+/web/ @org/findings
+/web/webapi/views/*.py @org/integrations
+/pkg/engine/ @org/scanning
+go.sum
+go.mod
+"""
+
+
+class TestDomainsForPr:
+    @pytest.fixture()
+    def rules(self):
+        return pr_labeler.parse_codeowners(SAMPLE_CODEOWNERS)
+
+    def test_single_domain(self, rules):
+        result = pr_labeler.domains_for_pr(rules, ["pkg/engine/scan.go"])
+        assert result == {"scanning"}
+
+    def test_last_match_wins(self, rules):
+        # web/webapi/views/foo.py matches both /web/ and /web/webapi/views/*.py;
+        # last-match-wins means integrations, not findings.
+        result = pr_labeler.domains_for_pr(rules, ["web/webapi/views/foo.py"])
+        assert result == {"integrations"}
+
+    def test_multi_domain_pr(self, rules):
+        result = pr_labeler.domains_for_pr(
+            rules, ["web/app.py", "pkg/engine/scan.go"]
+        )
+        assert result == {"findings", "scanning"}
+
+    def test_catch_all_fallback(self, rules):
+        result = pr_labeler.domains_for_pr(rules, ["README.md"])
+        assert result == {"eng-leads"}
+
+    def test_unowned_file(self, rules):
+        # go.sum has no owners in CODEOWNERS -> empty slug list from last match
+        result = pr_labeler.domains_for_pr(rules, ["go.sum"])
+        assert result == set()
+
+    def test_empty_files(self, rules):
+        assert pr_labeler.domains_for_pr(rules, []) == set()
+
+
+# ---- reconcile with domain labels -------------------------------------------
+
+
+class TestReconcileDomain:
+    def test_adds_domain_labels(self):
+        plan = _plan()
+        pr_labeler.reconcile(
+            _pr(additions=5),
+            plan=plan,
+            domain_slugs={"scanning", "findings"},
+        )
+        assert "domain/scanning" in plan.add
+        assert "domain/findings" in plan.add
+
+    def test_removes_stale_domain_labels(self):
+        plan = _plan()
+        pr_labeler.reconcile(
+            _pr(additions=5, labels=("domain/scanning", "domain/platform")),
+            plan=plan,
+            domain_slugs={"scanning"},
+        )
+        assert "domain/scanning" not in plan.add  # already present
+        assert "domain/scanning" not in plan.remove
+        assert "domain/platform" in plan.remove
+
+    def test_ignores_unknown_slugs(self):
+        plan = _plan()
+        pr_labeler.reconcile(
+            _pr(additions=5),
+            plan=plan,
+            domain_slugs={"eng-leads", "scanning"},
+        )
+        assert "domain/eng-leads" not in plan.add
+        assert "domain/scanning" in plan.add
+
+    def test_no_domain_changes_when_none(self):
+        plan = _plan()
+        pr_labeler.reconcile(
+            _pr(additions=5, labels=("domain/scanning",)),
+            plan=plan,
+            domain_slugs=None,
+        )
+        assert "domain/scanning" not in plan.remove
