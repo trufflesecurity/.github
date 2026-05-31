@@ -115,17 +115,24 @@ def _codeowners_match(pattern: str, filepath: str) -> bool:
     anchored = pattern.startswith("/")
     p = pattern.lstrip("/")
 
+    # Check for internal slash *before* appending ** for trailing-slash dirs.
+    # A trailing-only slash does not anchor; only leading or internal slashes do.
+    has_internal_slash = "/" in p.rstrip("/")
+
     if p.endswith("/"):
         p += "**"
 
-    has_slash = "/" in p.rstrip("/")
-
-    if anchored or has_slash:
+    if anchored or has_internal_slash:
         return _gitignore_match(p, filepath)
 
-    # No slash: match against basename at any depth.
-    basename = filepath.rsplit("/", 1)[-1]
-    return fnmatch(basename, p)
+    if "/" not in p:
+        # No slash at all: match against basename at any depth.
+        basename = filepath.rsplit("/", 1)[-1]
+        return fnmatch(basename, p)
+
+    # Trailing-slash-only dir (e.g. "vendor/") with no anchoring:
+    # match at any depth by prepending **/.
+    return _gitignore_match("**/" + p, filepath)
 
 
 def _gitignore_match(pattern: str, filepath: str) -> bool:
@@ -166,18 +173,27 @@ def domains_for_pr(rules: list[CodeownersRule], changed_files: list[str]) -> set
     return teams
 
 
+CODEOWNERS_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]
+
+
 def fetch_codeowners(repo: str) -> str | None:
-    """Fetch CODEOWNERS from the repo's default branch via the Contents API."""
-    result = gh(
-        ["api", f"repos/{repo}/contents/CODEOWNERS", "--jq", ".content"],
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    try:
-        return base64.b64decode(result.stdout.strip()).decode()
-    except Exception:
-        return None
+    """Fetch CODEOWNERS from the repo's default branch via the Contents API.
+
+    Checks the three locations GitHub supports, in priority order:
+    ``.github/CODEOWNERS``, ``CODEOWNERS``, ``docs/CODEOWNERS``.
+    """
+    for path in CODEOWNERS_PATHS:
+        result = gh(
+            ["api", f"repos/{repo}/contents/{path}", "--jq", ".content"],
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        try:
+            return base64.b64decode(result.stdout.strip()).decode()
+        except Exception:
+            continue
+    return None
 
 
 def fetch_pr_files(repo: str, pr_number: int) -> list[str]:

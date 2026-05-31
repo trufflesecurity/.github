@@ -467,6 +467,16 @@ class TestCodeownersMatch:
             "other/vendor/github.com/trufflesecurity/smallfetch/client.go",
         )
 
+    def test_trailing_slash_no_leading_slash_matches_any_depth(self):
+        # "vendor/" with no leading "/" should match at any depth
+        assert pr_labeler._codeowners_match("vendor/", "vendor/file.go")
+        assert pr_labeler._codeowners_match("vendor/", "nested/vendor/file.go")
+        assert pr_labeler._codeowners_match("vendor/", "a/b/vendor/deep.go")
+
+    def test_trailing_slash_with_leading_slash_anchored(self):
+        assert pr_labeler._codeowners_match("/vendor/", "vendor/file.go")
+        assert not pr_labeler._codeowners_match("/vendor/", "nested/vendor/file.go")
+
 
 # ---- domains_for_pr ---------------------------------------------------------
 
