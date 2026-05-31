@@ -401,13 +401,13 @@ class TestParseCodeowners:
         assert rules == [("*", ["scanning"])]
 
     def test_multiple_owners(self):
-        rules = pr_labeler.parse_codeowners(
-            "proto/ @org/integrations @org/scanning"
-        )
+        rules = pr_labeler.parse_codeowners("proto/ @org/integrations @org/scanning")
         assert rules == [("proto/", ["integrations", "scanning"])]
 
     def test_skips_comments_and_blanks(self):
-        text = "# comment\n\n* @org/eng-leads\n  # indented comment\n/web/ @org/findings"
+        text = (
+            "# comment\n\n* @org/eng-leads\n  # indented comment\n/web/ @org/findings"
+        )
         rules = pr_labeler.parse_codeowners(text)
         assert len(rules) == 2
         assert rules[0] == ("*", ["eng-leads"])
@@ -441,7 +441,9 @@ class TestCodeownersMatch:
         assert not pr_labeler._codeowners_match("pkg/engine/", "other/pkg/engine/x.go")
 
     def test_anchored_glob(self):
-        assert pr_labeler._codeowners_match("/web/webapi/views/*.py", "web/webapi/views/foo.py")
+        assert pr_labeler._codeowners_match(
+            "/web/webapi/views/*.py", "web/webapi/views/foo.py"
+        )
         assert not pr_labeler._codeowners_match(
             "/web/webapi/views/*.py", "web/webapi/views/sub/foo.py"
         )
@@ -495,9 +497,7 @@ class TestDomainsForPr:
         assert result == {"integrations"}
 
     def test_multi_domain_pr(self, rules):
-        result = pr_labeler.domains_for_pr(
-            rules, ["web/app.py", "pkg/engine/scan.go"]
-        )
+        result = pr_labeler.domains_for_pr(rules, ["web/app.py", "pkg/engine/scan.go"])
         assert result == {"findings", "scanning"}
 
     def test_catch_all_fallback(self, rules):

@@ -56,7 +56,15 @@ RISK_FALLBACK = "risk/high"
 
 DOMAIN_LABEL_PREFIX = "domain/"
 KNOWN_DOMAIN_SLUGS = frozenset(
-    ["scanning", "findings", "integrations", "platform", "frontend", "infra", "database"]
+    [
+        "scanning",
+        "findings",
+        "integrations",
+        "platform",
+        "frontend",
+        "infra",
+        "database",
+    ]
 )
 
 
@@ -146,9 +154,7 @@ def _segments_match(pat_parts: list[str], path_parts: list[str]) -> bool:
     return False
 
 
-def domains_for_pr(
-    rules: list[CodeownersRule], changed_files: list[str]
-) -> set[str]:
+def domains_for_pr(rules: list[CodeownersRule], changed_files: list[str]) -> set[str]:
     """Return the set of domain slugs that own any changed file."""
     teams: set[str] = set()
     for filepath in changed_files:
