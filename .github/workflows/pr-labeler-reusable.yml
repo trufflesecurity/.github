@@ -1,9 +1,10 @@
 name: PR Labeler (Reusable)
 
-# Reusable workflow for size/risk/checkbox labeling. Permissions are inherited
-# from the caller (intentionally not declared here -- declaring them would
-# override the caller's grant and produce "Resource not accessible" failures).
-# Callers must grant: pull-requests: write.
+# Reusable workflow for size/risk/template/domain labeling. Permissions are
+# inherited from the caller (intentionally not declared here -- declaring them
+# would override the caller's grant and produce "Resource not accessible"
+# failures). Callers must grant: contents: read (to read CODEOWNERS for
+# domain/* labels) and pull-requests: write (to read PR data and apply labels).
 
 on:
   workflow_call:
