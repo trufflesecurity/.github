@@ -36,6 +36,11 @@
       "matchManagers": ["github-actions"],
       "matchDepNames": ["/^trufflesecurity\\//"],
       "pinDigests": false
+    },
+    {
+      "description": "Don't apply the release-age cooldown to pins and digest re-pins. These introduce no new upstream release to age (a pin locks an already-allowed version; a digest re-pin/pinDigest is a hardening action), and minimumReleaseAge has no reliable timestamp to evaluate for digests, which leaves renovate/stability-days stuck pending. Real version upgrades (major/minor/patch) keep the 3-day delay; security updates already bypass it via vulnerabilityAlerts.",
+      "matchUpdateTypes": ["pin", "pinDigest", "digest"],
+      "minimumReleaseAge": null
     }
   ],
   "env": {
