@@ -30,6 +30,12 @@
       "description": "Group all GitHub Actions updates into a single PR",
       "matchManagers": ["github-actions"],
       "groupName": "github-actions"
+    },
+    {
+      "description": "Keep internal trufflesecurity actions and reusable workflows on their floating ref instead of SHA-pinning them. Internal actions are org-controlled, so the supply-chain risk is internal; pinning them only adds Renovate noise on every internal release. Scoped by regex because Renovate names a reusable-workflow dependency after its repo (e.g. 'trufflesecurity/.github'), and the leading dot defeats glob '*' matching (see trufflesecurity/slack-integration-service#568 / SCAN-914).",
+      "matchManagers": ["github-actions"],
+      "matchDepNames": ["/^trufflesecurity\\//"],
+      "pinDigests": false
     }
   ],
   "env": {
