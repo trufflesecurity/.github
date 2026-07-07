@@ -478,9 +478,6 @@ class TestCodeownersMatch:
         assert not pr_labeler._codeowners_match("/vendor/", "nested/vendor/file.go")
 
 
-# ---- domains_for_pr ---------------------------------------------------------
-
-
 SAMPLE_CODEOWNERS = """\
 * @org/eng-leads
 /web/ @org/findings
@@ -489,38 +486,6 @@ SAMPLE_CODEOWNERS = """\
 go.sum
 go.mod
 """
-
-
-class TestDomainsForPr:
-    @pytest.fixture()
-    def rules(self):
-        return pr_labeler.parse_codeowners(SAMPLE_CODEOWNERS)
-
-    def test_single_domain(self, rules):
-        result = pr_labeler.domains_for_pr(rules, ["pkg/engine/scan.go"])
-        assert result == {"scanning"}
-
-    def test_last_match_wins(self, rules):
-        # web/webapi/views/foo.py matches both /web/ and /web/webapi/views/*.py;
-        # last-match-wins means integrations, not findings.
-        result = pr_labeler.domains_for_pr(rules, ["web/webapi/views/foo.py"])
-        assert result == {"integrations"}
-
-    def test_multi_domain_pr(self, rules):
-        result = pr_labeler.domains_for_pr(rules, ["web/app.py", "pkg/engine/scan.go"])
-        assert result == {"findings", "scanning"}
-
-    def test_catch_all_fallback(self, rules):
-        result = pr_labeler.domains_for_pr(rules, ["README.md"])
-        assert result == {"eng-leads"}
-
-    def test_unowned_file(self, rules):
-        # go.sum has no owners in CODEOWNERS -> empty slug list from last match
-        result = pr_labeler.domains_for_pr(rules, ["go.sum"])
-        assert result == set()
-
-    def test_empty_files(self, rules):
-        assert pr_labeler.domains_for_pr(rules, []) == set()
 
 
 # ---- reconcile with domain labels -------------------------------------------
@@ -566,3 +531,206 @@ class TestReconcileDomain:
             domain_slugs=None,
         )
         assert "domain/scanning" not in plan.remove
+
+
+# ---- domain_reasons ---------------------------------------------------------
+
+
+CO_OWNED_CODEOWNERS = """\
+* @org/eng-leads
+proto/ @org/integrations @org/scanning
+"""
+
+UNKNOWN_TEAM_CODEOWNERS = """\
+* @org/eng-leads
+/foo/ @org/mystery
+"""
+
+
+class TestDomainReasons:
+    @pytest.fixture()
+    def rules(self):
+        return pr_labeler.parse_codeowners(SAMPLE_CODEOWNERS)
+
+    def test_single_domain(self, rules):
+        result = pr_labeler.domain_reasons(rules, ["pkg/engine/scan.go"])
+        assert result == {"scanning": [("pkg/engine/scan.go", "/pkg/engine/")]}
+
+    def test_multi_domain(self, rules):
+        result = pr_labeler.domain_reasons(rules, ["web/app.py", "pkg/engine/scan.go"])
+        assert result == {
+            "findings": [("web/app.py", "/web/")],
+            "scanning": [("pkg/engine/scan.go", "/pkg/engine/")],
+        }
+
+    def test_last_match_wins_pattern_reported(self, rules):
+        # foo.py matches both /web/ and the views glob; the *reported* pattern
+        # is the last match, not the directory default.
+        result = pr_labeler.domain_reasons(rules, ["web/webapi/views/foo.py"])
+        assert result == {
+            "integrations": [("web/webapi/views/foo.py", "/web/webapi/views/*.py")]
+        }
+
+    def test_co_owned_file_under_both_slugs(self):
+        rules = pr_labeler.parse_codeowners(CO_OWNED_CODEOWNERS)
+        result = pr_labeler.domain_reasons(rules, ["proto/api.proto"])
+        assert result == {
+            "integrations": [("proto/api.proto", "proto/")],
+            "scanning": [("proto/api.proto", "proto/")],
+        }
+
+    def test_unowned_file_no_entry(self, rules):
+        # go.sum's last match has no owner -> no reason recorded.
+        assert pr_labeler.domain_reasons(rules, ["go.sum"]) == {}
+
+    def test_catch_all_recorded(self, rules):
+        result = pr_labeler.domain_reasons(rules, ["README.md"])
+        assert result == {"eng-leads": [("README.md", "*")]}
+
+    def test_empty_files(self, rules):
+        assert pr_labeler.domain_reasons(rules, []) == {}
+
+
+# ---- render_domain_reasons --------------------------------------------------
+
+
+class TestRenderDomainReasons:
+    def test_empty_returns_empty_string(self):
+        assert pr_labeler.render_domain_reasons({}) == ""
+
+    def test_structure_markers_and_callout(self):
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/scan.go", "/pkg/engine/")]}
+        )
+        lines = out.splitlines()
+        assert lines[0] == pr_labeler.DOMAIN_REASONS_START
+        assert lines[1] == "---"
+        assert lines[3] == "> [!IMPORTANT]"
+        assert lines[-1] == pr_labeler.DOMAIN_REASONS_END
+        # Every content line between the markers is blockquoted.
+        for line in lines[3:-1]:
+            assert line == "" or line.startswith(">")
+
+    def test_known_slug_shows_charter_no_label(self):
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/scan.go", "/pkg/engine/")]}
+        )
+        assert "> - **scanning** - scan engine, job control, reverification" in out
+        assert "domain/scanning" not in out
+        assert "> - **scanning**" in out
+        assert "`pkg/engine/scan.go` (matched `/pkg/engine/`)" in out
+
+    def test_eng_leads_charter_present(self):
+        out = pr_labeler.render_domain_reasons({"eng-leads": [("README.md", "*")]})
+        assert (
+            "> - **eng-leads** - engineering leads; default reviewers for files "
+            "no domain team owns" in out
+        )
+
+    def test_unknown_slug_bare_name_no_charter(self):
+        out = pr_labeler.render_domain_reasons({"mystery": [("foo/x.go", "/foo/")]})
+        assert "> - **mystery**" in out
+        assert "> - **mystery** -" not in out  # no charter appended
+
+    def test_deterministic_known_first_catch_all_last(self):
+        reasons = {
+            "eng-leads": [("README.md", "*")],
+            "integrations": [("proto/x.proto", "proto/")],
+            "scanning": [("pkg/engine/s.go", "/pkg/engine/")],
+        }
+        out = pr_labeler.render_domain_reasons(reasons)
+        team_lines = [line for line in out.splitlines() if line.startswith("> - **")]
+        assert team_lines[0].startswith("> - **scanning**")
+        assert team_lines[1].startswith("> - **integrations**")
+        assert team_lines[2].startswith("> - **eng-leads**")
+
+    def test_file_cap_and_more(self):
+        files = [(f"pkg/engine/f{i:02d}.go", "/pkg/engine/") for i in range(12)]
+        out = pr_labeler.render_domain_reasons({"scanning": files})
+        listed = [line for line in out.splitlines() if line.startswith(">   - `")]
+        assert len(listed) == pr_labeler.DOMAIN_REASON_FILE_CAP
+        assert ">   - ...and 2 more" in out
+
+    def test_backtick_in_path_neutralized(self):
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/`evil`.go", "/pkg/engine/")]}
+        )
+        assert "`evil`" not in out
+        assert "`pkg/evil.go`" in out
+
+    def test_codeowners_link_when_url_provided(self):
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]},
+            codeowners_url="https://github.com/org/repo/blob/HEAD/CODEOWNERS",
+        )
+        assert "[CODEOWNERS](https://github.com/org/repo/blob/HEAD/CODEOWNERS)" in out
+
+    def test_codeowners_plain_when_no_url(self):
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]}
+        )
+        assert "per CODEOWNERS:" in out
+        assert "](http" not in out
+
+
+# ---- upsert_managed_section -------------------------------------------------
+
+START = pr_labeler.DOMAIN_REASONS_START
+END = pr_labeler.DOMAIN_REASONS_END
+
+
+def _section(text: str = "hello") -> str:
+    return f"{START}\n{text}\n{END}"
+
+
+class TestUpsertManagedSection:
+    def test_insert_when_absent_uses_blank_separator(self):
+        body = "Author summary."
+        section = _section()
+        out = pr_labeler.upsert_managed_section(body, section, START, END)
+        assert out == "Author summary.\n\n" + section
+
+    def test_insert_into_empty_body(self):
+        section = _section()
+        assert pr_labeler.upsert_managed_section("", section, START, END) == section
+
+    def test_replace_in_place_preserves_surroundings(self):
+        body = f"Top\n\n{_section('old')}\n\nBottom"
+        out = pr_labeler.upsert_managed_section(body, _section("new"), START, END)
+        assert out == f"Top\n\n{_section('new')}\n\nBottom"
+
+    def test_remove_restores_body_no_leftover_blanks(self):
+        body = "Author summary."
+        with_block = pr_labeler.upsert_managed_section(body, _section(), START, END)
+        removed = pr_labeler.upsert_managed_section(with_block, "", START, END)
+        assert removed == "Author summary."
+
+    def test_remove_when_absent_is_noop(self):
+        assert pr_labeler.upsert_managed_section("just text", "", START, END) == (
+            "just text"
+        )
+
+    def test_malformed_single_marker_falls_back_to_append(self):
+        # A lone START (END deleted by a user) must not corrupt the body via a
+        # bad slice; treat as absent and append.
+        body = f"Author text with a stray {START} marker."
+        section = _section()
+        out = pr_labeler.upsert_managed_section(body, section, START, END)
+        assert out.endswith("\n\n" + section)
+
+    def test_round_trip_idempotent(self):
+        body = "Author summary."
+        section = _section()
+        once = pr_labeler.upsert_managed_section(body, section, START, END)
+        twice = pr_labeler.upsert_managed_section(once, section, START, END)
+        assert once == twice
+
+    def test_render_then_upsert_idempotent(self):
+        # End-to-end: rendering and re-upserting the same reasons is a no-op.
+        reasons = {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]}
+        section = pr_labeler.render_domain_reasons(reasons)
+        body = "Author summary."
+        once = pr_labeler.upsert_managed_section(body, section, START, END)
+        section2 = pr_labeler.render_domain_reasons(reasons)
+        twice = pr_labeler.upsert_managed_section(once, section2, START, END)
+        assert once == twice
