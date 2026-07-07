@@ -628,7 +628,12 @@ class TestRenderDomainReasons:
         )
 
     def test_unknown_slug_bare_name_no_charter(self):
-        out = pr_labeler.render_domain_reasons({"mystery": [("foo/x.go", "/foo/")]})
+        # End-to-end: an owner with no DOMAIN_DESCRIPTIONS entry is still
+        # attributed and rendered, just with a bare slug and no charter.
+        rules = pr_labeler.parse_codeowners(UNKNOWN_TEAM_CODEOWNERS)
+        reasons = pr_labeler.domain_reasons(rules, ["foo/x.go"])
+        assert reasons == {"mystery": [("foo/x.go", "/foo/")]}
+        out = pr_labeler.render_domain_reasons(reasons)
         assert "> - **mystery**" in out
         assert "> - **mystery** -" not in out  # no charter appended
 
