@@ -677,6 +677,26 @@ class TestRenderDomainReasons:
         assert "per CODEOWNERS:" in out
         assert "](http" not in out
 
+    def test_leading_rule_present_by_default(self):
+        # Body variant separates the block from the author's text with a rule.
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]}
+        )
+        lines = out.splitlines()
+        assert lines[0] == pr_labeler.DOMAIN_REASONS_START
+        assert lines[1] == "---"
+
+    def test_leading_rule_omitted_for_comment(self):
+        # Comment variant has nothing above it, so no rule.
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]},
+            leading_rule=False,
+        )
+        lines = out.splitlines()
+        assert lines[0] == pr_labeler.DOMAIN_REASONS_START
+        assert "---" not in lines
+        assert lines[1] == "> [!IMPORTANT]"
+
 
 # ---- upsert_managed_section -------------------------------------------------
 
@@ -739,3 +759,55 @@ class TestUpsertManagedSection:
         section2 = pr_labeler.render_domain_reasons(reasons)
         twice = pr_labeler.upsert_managed_section(once, section2, START, END)
         assert once == twice
+
+
+# ---- sticky comment (REASONS_TARGET=comment) --------------------------------
+
+
+class TestFindReasonsComment:
+    def test_finds_comment_carrying_marker(self):
+        comments = [
+            {"id": 1, "body": "just a normal review comment"},
+            {"id": 2, "body": f"{START}\nreasons\n{END}"},
+        ]
+        assert pr_labeler.find_reasons_comment(comments)["id"] == 2
+
+    def test_returns_none_when_absent(self):
+        comments = [{"id": 1, "body": "no marker here"}]
+        assert pr_labeler.find_reasons_comment(comments) is None
+
+    def test_ignores_comments_without_body(self):
+        comments = [{"id": 1, "body": None}, {"id": 2, "body": f"{START}\nx\n{END}"}]
+        assert pr_labeler.find_reasons_comment(comments)["id"] == 2
+
+
+class TestPlanCommentAction:
+    def test_create_when_none_and_section(self):
+        action, note = pr_labeler.plan_comment_action(_section(), None)
+        assert action == "create"
+        assert "created" in note
+
+    def test_noop_when_none_and_empty(self):
+        assert pr_labeler.plan_comment_action("", None) is None
+
+    def test_update_when_body_differs(self):
+        existing = {"id": 9, "body": _section("old")}
+        action, note = pr_labeler.plan_comment_action(_section("new"), existing)
+        assert action == "update"
+        assert "updated" in note
+
+    def test_noop_when_body_matches(self):
+        existing = {"id": 9, "body": _section("same")}
+        assert pr_labeler.plan_comment_action(_section("same"), existing) is None
+
+    def test_noop_when_body_matches_modulo_crlf_and_whitespace(self):
+        # Round-tripped comment bodies may come back with CRLF / trailing space;
+        # that must not trigger a perpetual "update".
+        existing = {"id": 9, "body": _section("same").replace("\n", "\r\n") + "  \n"}
+        assert pr_labeler.plan_comment_action(_section("same"), existing) is None
+
+    def test_delete_when_empty_and_existing(self):
+        existing = {"id": 9, "body": _section("stale")}
+        action, note = pr_labeler.plan_comment_action("", existing)
+        assert action == "delete"
+        assert "removed" in note

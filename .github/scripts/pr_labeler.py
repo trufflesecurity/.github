@@ -6,6 +6,8 @@ Inputs come from environment variables set by the calling workflow:
   PR_NUMBER          "" (event mode), "all" (backfill), or "<number>"
   DRY_RUN            "true" or "false"
   EVENT_PR_NUMBER    PR number from `pull_request` event (if any), else ""
+  REASONS_TARGET     "comment" (default) or "body" -- where to publish the
+                     domain-reason section (see step 7)
 
 The script processes each PR by:
   1. Fetching additions, deletions, body, and current labels from the GitHub API.
@@ -20,11 +22,16 @@ The script processes each PR by:
      the queue rolls over.
   5. Matching changed files against CODEOWNERS to apply domain/* labels.
   6. Reconciling with current labels and applying adds/removes via `gh pr edit`.
-  7. Writing a managed "why these teams were requested for review" section into
-     the PR body, delimited by the DOMAIN_REVIEW_REASONS:START/END markers and
-     updated in place. It explains every CODEOWNERS-requested team (including the
-     eng-leads catch-all) with the files/patterns that matched. This is separate
-     from the domain/* labels and is only written when the body actually changes.
+  7. Publishing a managed "why these teams were requested for review" section
+     that explains every CODEOWNERS-requested team (including the eng-leads
+     catch-all) with the files/patterns that matched. This is separate from the
+     domain/* labels. REASONS_TARGET picks where it goes:
+       - "comment" (default): a single sticky PR comment carrying the
+         DOMAIN_REVIEW_REASONS:START/END markers, created once, edited in place
+         afterwards, and deleted if the PR no longer touches any owned files.
+       - "body": a region of the PR description delimited by the same markers,
+         rewritten in place and only when the body actually changes (quiet, no
+         notifications).
 
 For backfill mode (PR_NUMBER == "all"), per-PR failures are logged but do not
 abort the run, unless more than 10% of PRs fail.
@@ -98,6 +105,14 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
 
 # Max files listed per team before truncating with an "...and N more" line.
 DOMAIN_REASON_FILE_CAP = 10
+
+# Where to publish the reason section. "comment" (the default) maintains a
+# single sticky PR comment (one notification when first created, silent edits
+# after); "body" edits a managed region of the PR description (quiet, no
+# notifications). Selected per repo via the reusable workflow's
+# `reasons_target` input.
+REASONS_TARGET_BODY = "body"
+REASONS_TARGET_COMMENT = "comment"
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +264,7 @@ def _code_span(text: str) -> str:
 def render_domain_reasons(
     reasons: dict[str, list[tuple[str, str]]],
     codeowners_url: str | None = None,
+    leading_rule: bool = True,
 ) -> str:
     """Render the managed reason section, or ``""`` when there are no owners.
 
@@ -257,15 +273,19 @@ def render_domain_reasons(
     "Reviewers" sidebar, with a short charter when one is known, followed by the
     files (and matching pattern) that triggered it. Output is deterministic so
     the caller can skip writing when nothing changed.
+
+    ``leading_rule`` prepends a horizontal rule to visually separate the block
+    from the author's text above it -- useful in the PR body, but noise in a
+    standalone comment (where nothing precedes it), so comment mode passes False.
     """
     if not reasons:
         return ""
 
     codeowners = f"[CODEOWNERS]({codeowners_url})" if codeowners_url else "CODEOWNERS"
-    lines = [
-        DOMAIN_REASONS_START,
-        "---",
-        "",
+    lines = [DOMAIN_REASONS_START]
+    if leading_rule:
+        lines += ["---", ""]
+    lines += [
         "> [!IMPORTANT]",
         "> **Why these teams were requested for review**",
         f"> Each team owns some of the files changed here, per {codeowners}:",
@@ -431,6 +451,25 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     return json.loads(result.stdout)
 
 
+def fetch_pr_comments(repo: str, pr_number: int) -> list[dict]:
+    """Return the PR's issue comments as ``[{"id", "body"}, ...]``.
+
+    ``--jq '.[] | {id, body}'`` streams one compact JSON object per line (NDJSON)
+    across all paginated pages; ``id`` is the numeric REST id used to edit or
+    delete the comment.
+    """
+    result = gh(
+        [
+            "api",
+            "--paginate",
+            f"repos/{repo}/issues/{pr_number}/comments",
+            "--jq",
+            ".[] | {id, body}",
+        ]
+    )
+    return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+
 def list_open_prs(repo: str) -> list[int]:
     result = gh(
         [
@@ -594,6 +633,84 @@ def apply_body(repo: str, pr_number: int, new_body: str, dry_run: bool) -> None:
     gh(["pr", "edit", str(pr_number), "--repo", repo, "--body", new_body])
 
 
+def _normalize(text: str) -> str:
+    """Normalize line endings and trim, so equality checks don't churn."""
+    return text.replace("\r\n", "\n").strip()
+
+
+def find_reasons_comment(
+    comments: list[dict], marker: str = DOMAIN_REASONS_START
+) -> dict | None:
+    """Return our sticky comment (the one carrying ``marker``), or ``None``."""
+    for comment in comments:
+        if marker in (comment.get("body") or ""):
+            return comment
+    return None
+
+
+def plan_comment_action(section: str, existing: dict | None) -> tuple[str, str] | None:
+    """Decide what to do with the sticky comment; return ``(action, note)``.
+
+    Returns ``None`` when nothing needs to change. Actions are ``create`` (no
+    comment yet, reasons to show), ``update`` (content changed), and ``delete``
+    (a comment exists but there are no longer any reasons, e.g. the PR now
+    touches only unowned files).
+    """
+    if section:
+        if existing is None:
+            return ("create", "[comment: domain reasons created]")
+        if _normalize(existing.get("body") or "") != _normalize(section):
+            return ("update", "[comment: domain reasons updated]")
+        return None
+    if existing is not None:
+        return ("delete", "[comment: domain reasons removed]")
+    return None
+
+
+def apply_comment(
+    repo: str,
+    pr_number: int,
+    action: str,
+    section: str,
+    existing_id: int | None,
+    dry_run: bool,
+) -> None:
+    """Create, update, or delete the sticky reason comment (no-op on dry runs)."""
+    if dry_run:
+        return
+    if action == "create":
+        gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"repos/{repo}/issues/{pr_number}/comments",
+                "-f",
+                f"body={section}",
+            ]
+        )
+    elif action == "update":
+        gh(
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repo}/issues/comments/{existing_id}",
+                "-f",
+                f"body={section}",
+            ]
+        )
+    elif action == "delete":
+        gh(
+            [
+                "api",
+                "--method",
+                "DELETE",
+                f"repos/{repo}/issues/comments/{existing_id}",
+            ]
+        )
+
+
 def determine_targets(repo: str, pr_number_input: str, event_pr: str) -> list[int]:
     if pr_number_input == "all":
         return list_open_prs(repo)
@@ -610,12 +727,26 @@ def main() -> int:
     dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
     event_pr = os.environ.get("EVENT_PR_NUMBER", "").strip()
 
+    reasons_target = (
+        os.environ.get("REASONS_TARGET", REASONS_TARGET_COMMENT).strip().lower()
+    )
+    if reasons_target not in (REASONS_TARGET_BODY, REASONS_TARGET_COMMENT):
+        print(
+            f"Unknown REASONS_TARGET={reasons_target!r}; "
+            f"defaulting to {REASONS_TARGET_COMMENT!r}",
+            file=sys.stderr,
+        )
+        reasons_target = REASONS_TARGET_COMMENT
+
     targets = determine_targets(repo, pr_number_input, event_pr)
     if not targets:
         print("No PR to process; exiting.")
         return 0
 
-    print(f"Processing {len(targets)} PR(s) in {repo} (dry_run={dry_run})")
+    print(
+        f"Processing {len(targets)} PR(s) in {repo} "
+        f"(dry_run={dry_run}, reasons_target={reasons_target})"
+    )
 
     # Fetch CODEOWNERS once per run (same for all PRs in this repo).
     codeowners = fetch_codeowners(repo)
@@ -654,16 +785,32 @@ def main() -> int:
             reconcile(pr, plan=plan, domain_slugs=domain_slugs)
             apply(repo, plan, dry_run)
 
-            # Domain-reason section in the PR body (independent of labels so a
-            # body change and label changes don't clobber each other).
-            old_body = pr.get("body") or ""
-            section = render_domain_reasons(reasons, codeowners_url)
-            new_body = upsert_managed_section(
-                old_body, section, DOMAIN_REASONS_START, DOMAIN_REASONS_END
+            # Publish the domain-reason section (independent of labels so it and
+            # label changes don't clobber each other). The body variant gets a
+            # leading rule to separate it from the author's text; a standalone
+            # comment has nothing above it, so it omits the rule.
+            section = render_domain_reasons(
+                reasons,
+                codeowners_url,
+                leading_rule=(reasons_target == REASONS_TARGET_BODY),
             )
-            if new_body != old_body:
-                plan.notes.append("[body: domain reasons updated]")
-                apply_body(repo, pr_number, new_body, dry_run)
+            if reasons_target == REASONS_TARGET_COMMENT:
+                comments = fetch_pr_comments(repo, pr_number)
+                existing = find_reasons_comment(comments)
+                action = plan_comment_action(section, existing)
+                if action is not None:
+                    verb, note = action
+                    plan.notes.append(note)
+                    existing_id = existing["id"] if existing else None
+                    apply_comment(repo, pr_number, verb, section, existing_id, dry_run)
+            else:
+                old_body = pr.get("body") or ""
+                new_body = upsert_managed_section(
+                    old_body, section, DOMAIN_REASONS_START, DOMAIN_REASONS_END
+                )
+                if new_body != old_body:
+                    plan.notes.append("[body: domain reasons updated]")
+                    apply_body(repo, pr_number, new_body, dry_run)
 
             print(plan.summary())
         except subprocess.CalledProcessError as exc:

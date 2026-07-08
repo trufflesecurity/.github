@@ -19,6 +19,11 @@ on:
         type: boolean
         required: false
         default: false
+      reasons_target:
+        description: 'Where to publish the domain-review-reason section: "comment" (a single sticky PR comment) or "body" (managed region of the PR description, no notifications)'
+        type: string
+        required: false
+        default: comment
 
 jobs:
   label:
@@ -42,5 +47,6 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr_number }}
           DRY_RUN: ${{ inputs.dry_run }}
+          REASONS_TARGET: ${{ inputs.reasons_target }}
           EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 org-github/.github/scripts/pr_labeler.py
