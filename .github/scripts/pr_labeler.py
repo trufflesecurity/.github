@@ -274,6 +274,13 @@ def render_domain_reasons(
     files (and matching pattern) that triggered it. Output is deterministic so
     the caller can skip writing when nothing changed.
 
+    Two-part layout: a visible ``> [!IMPORTANT]`` callout (headline, team count,
+    provenance) followed by a default-collapsed ``<details>`` holding the
+    per-team file/pattern breakdown, so the detail is one click away rather than
+    always-on clutter. The callout stays *outside* the ``<details>`` because
+    GitHub does not render alert callouts nested inside a ``<details>`` block --
+    they degrade to a plain blockquote.
+
     ``leading_rule`` prepends a horizontal rule to visually separate the block
     from the author's text above it -- useful in the PR body, but noise in a
     standalone comment (where nothing precedes it), so comment mode passes False.
@@ -282,31 +289,38 @@ def render_domain_reasons(
         return ""
 
     codeowners = f"[CODEOWNERS]({codeowners_url})" if codeowners_url else "CODEOWNERS"
+    ordered = _ordered_reason_slugs(list(reasons))
+    count = len(ordered)
+    teams = "team" if count == 1 else "teams"
+    owns = "owns" if count == 1 else "own"
+
     lines = [DOMAIN_REASONS_START]
     if leading_rule:
         lines += ["---", ""]
     lines += [
         "> [!IMPORTANT]",
         "> **Why these teams were requested for review**",
-        f"> Each team owns some of the files changed here, per {codeowners}:",
+        f"> {count} {teams} {owns} some of the files changed here, per {codeowners}. "
+        "Expand for the files that matched.",
+        "> <sub>Maintained automatically by the PR labeler.</sub>",
+        "",
+        "<details>",
+        f"<summary>Which teams and files ({count})</summary>",
+        "",
     ]
-    for slug in _ordered_reason_slugs(list(reasons)):
+    for slug in ordered:
         charter = DOMAIN_DESCRIPTIONS.get(slug)
-        heading = f"> - **{slug}**"
+        heading = f"- **{slug}**"
         if charter:
             heading += f" - {charter}"
         lines.append(heading)
         files = sorted(reasons[slug])
         for filepath, pattern in files[:DOMAIN_REASON_FILE_CAP]:
-            lines.append(
-                f">   - {_code_span(filepath)} (matched {_code_span(pattern)})"
-            )
+            lines.append(f"  - {_code_span(filepath)} (matched {_code_span(pattern)})")
         remaining = len(files) - DOMAIN_REASON_FILE_CAP
         if remaining > 0:
-            lines.append(f">   - ...and {remaining} more")
-    lines.append(">")
-    lines.append("> <sub>Maintained automatically by the PR labeler.</sub>")
-    lines.append(DOMAIN_REASONS_END)
+            lines.append(f"  - ...and {remaining} more")
+    lines += ["", "</details>", DOMAIN_REASONS_END]
     return "\n".join(lines)
 
 

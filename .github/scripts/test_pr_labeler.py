@@ -607,23 +607,26 @@ class TestRenderDomainReasons:
         assert lines[1] == "---"
         assert lines[3] == "> [!IMPORTANT]"
         assert lines[-1] == pr_labeler.DOMAIN_REASONS_END
-        # Every content line between the markers is blockquoted.
-        for line in lines[3:-1]:
-            assert line == "" or line.startswith(">")
+        assert lines[-2] == "</details>"
+        # The visible callout is a blockquote; the collapsed breakdown lives in
+        # a <details> whose inner list is plain (non-blockquoted) markdown so it
+        # renders inside the block.
+        assert "<details>" in lines
+        assert "<summary>Which teams and files (1)</summary>" in lines
+        assert "- **scanning** - scan engine, job control, reverification" in lines
 
     def test_known_slug_shows_charter_no_label(self):
         out = pr_labeler.render_domain_reasons(
             {"scanning": [("pkg/engine/scan.go", "/pkg/engine/")]}
         )
-        assert "> - **scanning** - scan engine, job control, reverification" in out
+        assert "- **scanning** - scan engine, job control, reverification" in out
         assert "domain/scanning" not in out
-        assert "> - **scanning**" in out
         assert "`pkg/engine/scan.go` (matched `/pkg/engine/`)" in out
 
     def test_eng_leads_charter_present(self):
         out = pr_labeler.render_domain_reasons({"eng-leads": [("README.md", "*")]})
         assert (
-            "> - **eng-leads** - engineering leads; default reviewers for files "
+            "- **eng-leads** - engineering leads; default reviewers for files "
             "no domain team owns" in out
         )
 
@@ -634,8 +637,8 @@ class TestRenderDomainReasons:
         reasons = pr_labeler.domain_reasons(rules, ["foo/x.go"])
         assert reasons == {"mystery": [("foo/x.go", "/foo/")]}
         out = pr_labeler.render_domain_reasons(reasons)
-        assert "> - **mystery**" in out
-        assert "> - **mystery** -" not in out  # no charter appended
+        assert "- **mystery**" in out
+        assert "- **mystery** -" not in out  # no charter appended
 
     def test_deterministic_known_first_catch_all_last(self):
         reasons = {
@@ -644,17 +647,17 @@ class TestRenderDomainReasons:
             "scanning": [("pkg/engine/s.go", "/pkg/engine/")],
         }
         out = pr_labeler.render_domain_reasons(reasons)
-        team_lines = [line for line in out.splitlines() if line.startswith("> - **")]
-        assert team_lines[0].startswith("> - **scanning**")
-        assert team_lines[1].startswith("> - **integrations**")
-        assert team_lines[2].startswith("> - **eng-leads**")
+        team_lines = [line for line in out.splitlines() if line.startswith("- **")]
+        assert team_lines[0].startswith("- **scanning**")
+        assert team_lines[1].startswith("- **integrations**")
+        assert team_lines[2].startswith("- **eng-leads**")
 
     def test_file_cap_and_more(self):
         files = [(f"pkg/engine/f{i:02d}.go", "/pkg/engine/") for i in range(12)]
         out = pr_labeler.render_domain_reasons({"scanning": files})
-        listed = [line for line in out.splitlines() if line.startswith(">   - `")]
+        listed = [line for line in out.splitlines() if line.startswith("  - `")]
         assert len(listed) == pr_labeler.DOMAIN_REASON_FILE_CAP
-        assert ">   - ...and 2 more" in out
+        assert "  - ...and 2 more" in out
 
     def test_backtick_in_path_neutralized(self):
         out = pr_labeler.render_domain_reasons(
@@ -674,7 +677,7 @@ class TestRenderDomainReasons:
         out = pr_labeler.render_domain_reasons(
             {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]}
         )
-        assert "per CODEOWNERS:" in out
+        assert "per CODEOWNERS." in out
         assert "](http" not in out
 
     def test_leading_rule_present_by_default(self):
@@ -696,6 +699,54 @@ class TestRenderDomainReasons:
         assert lines[0] == pr_labeler.DOMAIN_REASONS_START
         assert "---" not in lines
         assert lines[1] == "> [!IMPORTANT]"
+
+    def test_details_block_default_collapsed(self):
+        # The breakdown is wrapped in a <details> with no `open` attribute, so
+        # it stays collapsed until the reader clicks.
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]}
+        )
+        assert "<details>" in out
+        assert "<details open" not in out
+        assert "</details>" in out
+        assert "<summary>Which teams and files (1)</summary>" in out
+
+    def test_breakdown_inside_details_not_in_callout(self):
+        # Team/file lines moved out of the callout blockquote into the details
+        # block: the callout (everything before <details>) must not carry them.
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]}
+        )
+        callout = out.split("<details>", 1)[0]
+        assert "scanning" not in callout
+        assert "> - **scanning**" not in out
+        assert "- **scanning**" in out
+
+    def test_blank_line_after_summary(self):
+        # A blank line must follow </summary> so GitHub renders the inner list.
+        out = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]}
+        )
+        lines = out.splitlines()
+        summary_idx = next(
+            i for i, line in enumerate(lines) if line.startswith("<summary>")
+        )
+        assert lines[summary_idx + 1] == ""
+
+    def test_team_count_and_verb_agreement(self):
+        one = pr_labeler.render_domain_reasons(
+            {"scanning": [("pkg/engine/s.go", "/pkg/engine/")]}
+        )
+        assert "1 team owns some of the files" in one
+        assert "<summary>Which teams and files (1)</summary>" in one
+        many = pr_labeler.render_domain_reasons(
+            {
+                "scanning": [("pkg/engine/s.go", "/pkg/engine/")],
+                "eng-leads": [("README.md", "*")],
+            }
+        )
+        assert "2 teams own some of the files" in many
+        assert "<summary>Which teams and files (2)</summary>" in many
 
 
 # ---- upsert_managed_section -------------------------------------------------
