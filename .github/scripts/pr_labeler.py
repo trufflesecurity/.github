@@ -6,6 +6,8 @@ Inputs come from environment variables set by the calling workflow:
   PR_NUMBER          "" (event mode), "all" (backfill), or "<number>"
   DRY_RUN            "true" or "false"
   EVENT_PR_NUMBER    PR number from `pull_request` event (if any), else ""
+  REASONS_TARGET     "comment" (default) or "body" -- where to publish the
+                     domain-reason section (see step 7)
 
 The script processes each PR by:
   1. Fetching additions, deletions, body, and current labels from the GitHub API.
@@ -20,6 +22,16 @@ The script processes each PR by:
      the queue rolls over.
   5. Matching changed files against CODEOWNERS to apply domain/* labels.
   6. Reconciling with current labels and applying adds/removes via `gh pr edit`.
+  7. Publishing a managed "why these teams were requested for review" section
+     that explains every CODEOWNERS-requested team (including the eng-leads
+     catch-all) with the files/patterns that matched. This is separate from the
+     domain/* labels. REASONS_TARGET picks where it goes:
+       - "comment" (default): a single sticky PR comment carrying the
+         DOMAIN_REVIEW_REASONS:START/END markers, created once, edited in place
+         afterwards, and deleted if the PR no longer touches any owned files.
+       - "body": a region of the PR description delimited by the same markers,
+         rewritten in place and only when the body actually changes (quiet, no
+         notifications).
 
 For backfill mode (PR_NUMBER == "all"), per-PR failures are logged but do not
 abort the run, unless more than 10% of PRs fail.
@@ -66,6 +78,41 @@ KNOWN_DOMAIN_SLUGS = frozenset(
         "database",
     ]
 )
+
+# Managed section written into the PR body explaining why each team was
+# requested for review. Delimited by these markers so the labeler can rewrite
+# its own region in place without disturbing the rest of the description (the
+# same technique Bugbot uses with CURSOR_SUMMARY).
+DOMAIN_REASONS_START = "<!-- DOMAIN_REVIEW_REASONS:START -->"
+DOMAIN_REASONS_END = "<!-- DOMAIN_REVIEW_REASONS:END -->"
+
+# One-line charters, sourced from the Cross-Repo Ownership Redesign plan, so the
+# reason explains *what* the team owns rather than just listing files. Covers the
+# 7 KNOWN_DOMAIN_SLUGS plus the eng-leads catch-all. Owners without an entry here
+# are still rendered (raw slug, no charter). Insertion order also defines the
+# display order of known teams (see render_domain_reasons) -- do not rely on set
+# order, which varies per process under hash randomization.
+DOMAIN_DESCRIPTIONS: dict[str, str] = {
+    "scanning": "scan engine, job control, reverification",
+    "integrations": "sources, detectors, and analyzers",
+    "findings": "secrets triage, dashboard, issues, reporting, notifications",
+    "platform": "auth, RBAC, API keys, audit logs, observability, dev tooling",
+    "frontend": "shared frontend/React code, design system, view API contracts",
+    "infra": "infrastructure, CI, and root build/deploy configs",
+    "database": "DB models, migrations, signals, and Go DB infrastructure",
+    "eng-leads": "engineering leads; default reviewers for files no domain team owns",
+}
+
+# Max files listed per team before truncating with an "...and N more" line.
+DOMAIN_REASON_FILE_CAP = 10
+
+# Where to publish the reason section. "comment" (the default) maintains a
+# single sticky PR comment (one notification when first created, silent edits
+# after); "body" edits a managed region of the PR description (quiet, no
+# notifications). Selected per repo via the reusable workflow's
+# `reasons_target` input.
+REASONS_TARGET_BODY = "body"
+REASONS_TARGET_COMMENT = "comment"
 
 
 # ---------------------------------------------------------------------------
@@ -161,26 +208,152 @@ def _segments_match(pat_parts: list[str], path_parts: list[str]) -> bool:
     return False
 
 
-def domains_for_pr(rules: list[CodeownersRule], changed_files: list[str]) -> set[str]:
-    """Return the set of domain slugs that own any changed file."""
-    teams: set[str] = set()
+def domain_reasons(
+    rules: list[CodeownersRule], changed_files: list[str]
+) -> dict[str, list[tuple[str, str]]]:
+    """Map each owning team slug to the files (and pattern) that requested it.
+
+    Applies GitHub's last-match-wins semantics: each file is attributed to the
+    owners of the *last* CODEOWNERS rule it matches. For every such
+    (filepath, pattern) we record an entry under each owning slug, so the caller
+    can both apply domain labels (``set(domain_reasons(...))``) and explain
+    exactly why a team was added as a reviewer.
+
+    Files whose last match has no owner (empty owner list, e.g. lock files or
+    ``vendor/`` for Renovate) contribute nothing -- consistent with GitHub not
+    requesting a reviewer for them.
+    """
+    reasons: dict[str, list[tuple[str, str]]] = {}
     for filepath in changed_files:
+        matched_pattern: str | None = None
         matched_slugs: list[str] = []
         for pattern, slugs in rules:
             if _codeowners_match(pattern, filepath):
+                matched_pattern = pattern
                 matched_slugs = slugs
-        teams.update(matched_slugs)
-    return teams
+        if matched_pattern is None:
+            continue
+        for slug in matched_slugs:
+            reasons.setdefault(slug, []).append((filepath, matched_pattern))
+    return reasons
+
+
+def _ordered_reason_slugs(slugs: list[str]) -> list[str]:
+    """Return slugs in deterministic display order.
+
+    Known teams appear first in ``DOMAIN_DESCRIPTIONS`` insertion order (which
+    puts the eng-leads catch-all last), followed by any remaining slugs sorted
+    alphabetically. Iterating a set (e.g. ``KNOWN_DOMAIN_SLUGS``) here would be
+    non-deterministic under hash randomization and cause spurious body rewrites.
+    """
+    present = set(slugs)
+    known = [s for s in DOMAIN_DESCRIPTIONS if s in present]
+    rest = sorted(s for s in present if s not in DOMAIN_DESCRIPTIONS)
+    return known + rest
+
+
+def _code_span(text: str) -> str:
+    """Wrap text in a backtick code span, neutralizing embedded backticks.
+
+    GitHub sanitizes HTML, so this is cosmetic hardening to keep a pathological
+    filename from breaking out of the span rather than a security control.
+    """
+    return f"`{text.replace('`', '')}`"
+
+
+def render_domain_reasons(
+    reasons: dict[str, list[tuple[str, str]]],
+    codeowners_url: str | None = None,
+    leading_rule: bool = True,
+) -> str:
+    """Render the managed reason section, or ``""`` when there are no owners.
+
+    Explains every team requested for review (not just the labeled domains):
+    each team is shown by its raw CODEOWNERS slug so it matches GitHub's
+    "Reviewers" sidebar, with a short charter when one is known, followed by the
+    files (and matching pattern) that triggered it. Output is deterministic so
+    the caller can skip writing when nothing changed.
+
+    ``leading_rule`` prepends a horizontal rule to visually separate the block
+    from the author's text above it -- useful in the PR body, but noise in a
+    standalone comment (where nothing precedes it), so comment mode passes False.
+    """
+    if not reasons:
+        return ""
+
+    codeowners = f"[CODEOWNERS]({codeowners_url})" if codeowners_url else "CODEOWNERS"
+    lines = [DOMAIN_REASONS_START]
+    if leading_rule:
+        lines += ["---", ""]
+    lines += [
+        "> [!IMPORTANT]",
+        "> **Why these teams were requested for review**",
+        f"> Each team owns some of the files changed here, per {codeowners}:",
+    ]
+    for slug in _ordered_reason_slugs(list(reasons)):
+        charter = DOMAIN_DESCRIPTIONS.get(slug)
+        heading = f"> - **{slug}**"
+        if charter:
+            heading += f" - {charter}"
+        lines.append(heading)
+        files = sorted(reasons[slug])
+        for filepath, pattern in files[:DOMAIN_REASON_FILE_CAP]:
+            lines.append(
+                f">   - {_code_span(filepath)} (matched {_code_span(pattern)})"
+            )
+        remaining = len(files) - DOMAIN_REASON_FILE_CAP
+        if remaining > 0:
+            lines.append(f">   - ...and {remaining} more")
+    lines.append(">")
+    lines.append("> <sub>Maintained automatically by the PR labeler.</sub>")
+    lines.append(DOMAIN_REASONS_END)
+    return "\n".join(lines)
+
+
+def upsert_managed_section(body: str, section: str, start: str, end: str) -> str:
+    """Insert, replace, or remove a marker-delimited section in ``body``.
+
+    - Both markers present (``start`` before ``end``): replace the inclusive
+      region with ``section`` (or remove it, plus the preceding blank
+      separator, when ``section`` is empty).
+    - Markers absent or malformed: append ``section`` after a blank-line
+      separator (the blank line keeps a leading ``---`` from turning the
+      author's last line into a setext heading). Empty ``section`` is a no-op.
+
+    Feeding this function's own output back in is idempotent.
+    """
+    body = body or ""
+    start_idx = body.find(start)
+    end_idx = body.find(end)
+
+    if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+        region_end = end_idx + len(end)
+        before = body[:start_idx]
+        after = body[region_end:]
+        if section:
+            return before + section + after
+        # Removing: also drop the blank separator we inserted before the block
+        # so repeated add/remove cycles don't accumulate blank lines.
+        return before.rstrip("\n") + after
+
+    if not section:
+        return body
+    if not body.strip():
+        return section
+    return body.rstrip() + "\n\n" + section
 
 
 CODEOWNERS_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]
 
 
-def fetch_codeowners(repo: str) -> str | None:
+def fetch_codeowners(repo: str) -> tuple[str, str] | None:
     """Fetch CODEOWNERS from the repo's default branch via the Contents API.
 
     Checks the three locations GitHub supports, in priority order:
     ``.github/CODEOWNERS``, ``CODEOWNERS``, ``docs/CODEOWNERS``.
+
+    Returns a ``(text, path)`` tuple identifying which location was used (so the
+    caller can build a link to it), or ``None`` if no CODEOWNERS file exists.
     """
     for path in CODEOWNERS_PATHS:
         result = gh(
@@ -190,19 +363,10 @@ def fetch_codeowners(repo: str) -> str | None:
         if result.returncode != 0:
             continue
         try:
-            return base64.b64decode(result.stdout.strip()).decode()
+            return base64.b64decode(result.stdout.strip()).decode(), path
         except Exception:
             continue
     return None
-
-
-def fetch_pr_files(repo: str, pr_number: int) -> list[str]:
-    """Return the list of changed file paths for a PR."""
-    result = gh(
-        ["pr", "view", str(pr_number), "--repo", repo, "--json", "files"],
-    )
-    data = json.loads(result.stdout)
-    return [f["path"] for f in data.get("files", [])]
 
 
 def yesno_regex(keyword: str) -> re.Pattern[str]:
@@ -281,10 +445,29 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
             "--repo",
             repo,
             "--json",
-            "number,additions,deletions,body,labels,state",
+            "number,additions,deletions,body,labels,state,files",
         ]
     )
     return json.loads(result.stdout)
+
+
+def fetch_pr_comments(repo: str, pr_number: int) -> list[dict]:
+    """Return the PR's issue comments as ``[{"id", "body"}, ...]``.
+
+    ``--jq '.[] | {id, body}'`` streams one compact JSON object per line (NDJSON)
+    across all paginated pages; ``id`` is the numeric REST id used to edit or
+    delete the comment.
+    """
+    result = gh(
+        [
+            "api",
+            "--paginate",
+            f"repos/{repo}/issues/{pr_number}/comments",
+            "--jq",
+            ".[] | {id, body}",
+        ]
+    )
+    return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
 
 
 def list_open_prs(repo: str) -> list[int]:
@@ -438,6 +621,96 @@ def apply(repo: str, plan: LabelPlan, dry_run: bool) -> None:
     gh(args)
 
 
+def apply_body(repo: str, pr_number: int, new_body: str, dry_run: bool) -> None:
+    """Set the PR body via ``gh pr edit`` (no-op on dry runs).
+
+    The caller is responsible for only invoking this when the body actually
+    changed, so we don't issue a redundant edit (and don't emit a needless
+    ``edited`` timeline event).
+    """
+    if dry_run:
+        return
+    gh(["pr", "edit", str(pr_number), "--repo", repo, "--body", new_body])
+
+
+def _normalize(text: str) -> str:
+    """Normalize line endings and trim, so equality checks don't churn."""
+    return text.replace("\r\n", "\n").strip()
+
+
+def find_reasons_comment(
+    comments: list[dict], marker: str = DOMAIN_REASONS_START
+) -> dict | None:
+    """Return our sticky comment (the one carrying ``marker``), or ``None``."""
+    for comment in comments:
+        if marker in (comment.get("body") or ""):
+            return comment
+    return None
+
+
+def plan_comment_action(section: str, existing: dict | None) -> tuple[str, str] | None:
+    """Decide what to do with the sticky comment; return ``(action, note)``.
+
+    Returns ``None`` when nothing needs to change. Actions are ``create`` (no
+    comment yet, reasons to show), ``update`` (content changed), and ``delete``
+    (a comment exists but there are no longer any reasons, e.g. the PR now
+    touches only unowned files).
+    """
+    if section:
+        if existing is None:
+            return ("create", "[comment: domain reasons created]")
+        if _normalize(existing.get("body") or "") != _normalize(section):
+            return ("update", "[comment: domain reasons updated]")
+        return None
+    if existing is not None:
+        return ("delete", "[comment: domain reasons removed]")
+    return None
+
+
+def apply_comment(
+    repo: str,
+    pr_number: int,
+    action: str,
+    section: str,
+    existing_id: int | None,
+    dry_run: bool,
+) -> None:
+    """Create, update, or delete the sticky reason comment (no-op on dry runs)."""
+    if dry_run:
+        return
+    if action == "create":
+        gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"repos/{repo}/issues/{pr_number}/comments",
+                "-f",
+                f"body={section}",
+            ]
+        )
+    elif action == "update":
+        gh(
+            [
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repo}/issues/comments/{existing_id}",
+                "-f",
+                f"body={section}",
+            ]
+        )
+    elif action == "delete":
+        gh(
+            [
+                "api",
+                "--method",
+                "DELETE",
+                f"repos/{repo}/issues/comments/{existing_id}",
+            ]
+        )
+
+
 def determine_targets(repo: str, pr_number_input: str, event_pr: str) -> list[int]:
     if pr_number_input == "all":
         return list_open_prs(repo)
@@ -454,18 +727,35 @@ def main() -> int:
     dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
     event_pr = os.environ.get("EVENT_PR_NUMBER", "").strip()
 
+    reasons_target = (
+        os.environ.get("REASONS_TARGET", REASONS_TARGET_COMMENT).strip().lower()
+    )
+    if reasons_target not in (REASONS_TARGET_BODY, REASONS_TARGET_COMMENT):
+        print(
+            f"Unknown REASONS_TARGET={reasons_target!r}; "
+            f"defaulting to {REASONS_TARGET_COMMENT!r}",
+            file=sys.stderr,
+        )
+        reasons_target = REASONS_TARGET_COMMENT
+
     targets = determine_targets(repo, pr_number_input, event_pr)
     if not targets:
         print("No PR to process; exiting.")
         return 0
 
-    print(f"Processing {len(targets)} PR(s) in {repo} (dry_run={dry_run})")
+    print(
+        f"Processing {len(targets)} PR(s) in {repo} "
+        f"(dry_run={dry_run}, reasons_target={reasons_target})"
+    )
 
     # Fetch CODEOWNERS once per run (same for all PRs in this repo).
-    codeowners_text = fetch_codeowners(repo)
+    codeowners = fetch_codeowners(repo)
     codeowners_rules: list[CodeownersRule] | None = None
-    if codeowners_text is not None:
+    codeowners_url: str | None = None
+    if codeowners is not None:
+        codeowners_text, codeowners_path = codeowners
         codeowners_rules = parse_codeowners(codeowners_text)
+        codeowners_url = f"https://github.com/{repo}/blob/HEAD/{codeowners_path}"
         print(f"Loaded {len(codeowners_rules)} CODEOWNERS rule(s) for domain labeling")
     else:
         print("No CODEOWNERS found; skipping domain labeling")
@@ -479,13 +769,49 @@ def main() -> int:
                 print(f"PR #{pr_number} (skip: not open)")
                 continue
 
+            # Match changed files against CODEOWNERS once; the label set is just
+            # the owning slugs, and the reasons carry the files/patterns for the
+            # body section. domain_slugs stays None (not an empty set) when there
+            # is no CODEOWNERS so reconcile leaves existing domain labels alone;
+            # note the body section below is still reconciled in that case, so a
+            # stale block is cleaned up even after CODEOWNERS is removed.
             domain_slugs: set[str] | None = None
+            reasons: dict[str, list[tuple[str, str]]] = {}
             if codeowners_rules is not None:
-                files = fetch_pr_files(repo, pr_number)
-                domain_slugs = domains_for_pr(codeowners_rules, files)
+                files = [f["path"] for f in pr.get("files", [])]
+                reasons = domain_reasons(codeowners_rules, files)
+                domain_slugs = set(reasons)
 
             reconcile(pr, plan=plan, domain_slugs=domain_slugs)
             apply(repo, plan, dry_run)
+
+            # Publish the domain-reason section (independent of labels so it and
+            # label changes don't clobber each other). The body variant gets a
+            # leading rule to separate it from the author's text; a standalone
+            # comment has nothing above it, so it omits the rule.
+            section = render_domain_reasons(
+                reasons,
+                codeowners_url,
+                leading_rule=(reasons_target == REASONS_TARGET_BODY),
+            )
+            if reasons_target == REASONS_TARGET_COMMENT:
+                comments = fetch_pr_comments(repo, pr_number)
+                existing = find_reasons_comment(comments)
+                action = plan_comment_action(section, existing)
+                if action is not None:
+                    verb, note = action
+                    plan.notes.append(note)
+                    existing_id = existing["id"] if existing else None
+                    apply_comment(repo, pr_number, verb, section, existing_id, dry_run)
+            else:
+                old_body = pr.get("body") or ""
+                new_body = upsert_managed_section(
+                    old_body, section, DOMAIN_REASONS_START, DOMAIN_REASONS_END
+                )
+                if new_body != old_body:
+                    plan.notes.append("[body: domain reasons updated]")
+                    apply_body(repo, pr_number, new_body, dry_run)
+
             print(plan.summary())
         except subprocess.CalledProcessError as exc:
             failures += 1
