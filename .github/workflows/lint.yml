@@ -16,12 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       # ruff-action v4+ ships immutable tags only (no rolling @v4); pin to the patch.
+      # Also pin the ruff binary: an unpinned ruff-action installs the latest ruff
+      # at run time, so a new release can fail lint on unchanged code.
       - uses: astral-sh/ruff-action@v4.0.0
         with:
+          version: '0.15.22'
           src: '.github/scripts'
           args: 'check'
       - uses: astral-sh/ruff-action@v4.0.0
         with:
+          version: '0.15.22'
           src: '.github/scripts'
           args: 'format --check'
 
