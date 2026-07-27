@@ -34,7 +34,8 @@ The script processes each PR by:
          notifications).
 
 For backfill mode (PR_NUMBER == "all"), per-PR failures are logged but do not
-abort the run, unless more than 10% of PRs fail.
+abort the run unless at least MIN_FAILURES_TO_FAIL PRs fail and they exceed
+FAILURE_RATE_THRESHOLD of the run; a single failure never fails the run.
 """
 
 from __future__ import annotations
@@ -42,9 +43,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 
@@ -113,6 +116,13 @@ DOMAIN_REASON_FILE_CAP = 10
 # `reasons_target` input.
 REASONS_TARGET_BODY = "body"
 REASONS_TARGET_COMMENT = "comment"
+
+# Failure-rate gate for backfill mode. A single failure never fails the run, so
+# event mode (one target) tolerates one transient error even if gh() retries are
+# exhausted; backfill still fails when 2+ PRs fail and the rate exceeds the
+# threshold.
+MIN_FAILURES_TO_FAIL = 2
+FAILURE_RATE_THRESHOLD = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -446,8 +456,74 @@ class LabelPlan:
         )
 
 
+# Bounded retry policy for transient GitHub API failures (e.g. HTTP 504). gh()
+# retries only failures classified transient by _is_retryable_gh_error; real
+# errors (404, auth, bad input) fail fast.
+GH_MAX_ATTEMPTS = 3
+GH_BACKOFF_BASE_SECONDS = 1.0
+
+# Case-insensitive substrings that mark a gh failure as a momentary
+# server/network hiccup rather than a real error.
+_RETRYABLE_GH_SIGNATURES = (
+    "http 502",
+    "http 503",
+    "http 504",
+    "couldn't respond to your request in time",
+    "timeout",
+    "timed out",
+    "connection reset",
+    "connection refused",
+    "early eof",
+    "unexpected eof",
+    "secondary rate limit",
+    "abuse detection",
+)
+
+
+def _is_retryable_gh_error(stderr: str) -> bool:
+    """Classify a gh failure as transient (worth retrying) from its stderr.
+
+    Matches the signatures GitHub emits for momentary server or network hiccups
+    (5xx, request timeouts, dropped connections, secondary rate limits). Real
+    errors (404, auth, bad input) carry none of these and must fail fast.
+    """
+    haystack = stderr.lower()
+    return any(sig in haystack for sig in _RETRYABLE_GH_SIGNATURES)
+
+
 def gh(args: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["gh", *args], capture_output=True, text=True, check=check)
+    """Run a ``gh`` subprocess, retrying transient GitHub API failures.
+
+    Retries only failures classified transient by ``_is_retryable_gh_error``, up
+    to ``GH_MAX_ATTEMPTS`` with exponential backoff plus jitter. A non-retryable
+    failure honors ``check`` immediately (raising ``CalledProcessError`` when
+    ``check`` is true, else returning the completed process), so a 404 or auth
+    error still fails fast. The final attempt likewise honors ``check``.
+    """
+    for attempt in range(1, GH_MAX_ATTEMPTS + 1):
+        result = subprocess.run(
+            ["gh", *args], capture_output=True, text=True, check=False
+        )
+        if result.returncode == 0:
+            return result
+        final_attempt = attempt == GH_MAX_ATTEMPTS
+        if final_attempt or not _is_retryable_gh_error(result.stderr):
+            if check:
+                raise subprocess.CalledProcessError(
+                    result.returncode, result.args, result.stdout, result.stderr
+                )
+            return result
+        delay = GH_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1) + random.uniform(
+            0, GH_BACKOFF_BASE_SECONDS / 2
+        )
+        print(
+            f"gh transient error (attempt {attempt}/{GH_MAX_ATTEMPTS}), "
+            f"retrying in {delay:.1f}s: {result.stderr.strip()[:200]}",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+    # The loop returns or raises on the final attempt; this is unreachable.
+    raise AssertionError("gh() retry loop exited without returning")
 
 
 def fetch_pr(repo: str, pr_number: int) -> dict:
@@ -834,9 +910,14 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-    if targets and failures / len(targets) > 0.10:
+    if (
+        targets
+        and failures >= MIN_FAILURES_TO_FAIL
+        and failures / len(targets) > FAILURE_RATE_THRESHOLD
+    ):
         print(
-            f"Failure rate {failures}/{len(targets)} exceeds 10% threshold; failing run.",
+            f"Failure rate {failures}/{len(targets)} exceeds "
+            f"{FAILURE_RATE_THRESHOLD:.0%} threshold; failing run.",
             file=sys.stderr,
         )
         return 1

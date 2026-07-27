@@ -5,6 +5,7 @@ Run with: python -m pytest .github/scripts/test_pr_labeler.py -v
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -862,3 +863,165 @@ class TestPlanCommentAction:
         action, note = pr_labeler.plan_comment_action("", existing)
         assert action == "delete"
         assert "removed" in note
+
+
+# ---- _is_retryable_gh_error -------------------------------------------------
+
+
+class TestIsRetryableGhError:
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: something failed (HTTP 504)",
+            "gh: We couldn't respond to your request in time.",
+            "Client.Timeout exceeded while awaiting headers",
+            "request timed out",
+            "read tcp: connection reset by peer",
+            "dial tcp: connection refused",
+            "unexpected EOF",
+            "error: RPC failed; curl 56 recv failure: early EOF",
+            "You have exceeded a secondary rate limit",
+        ],
+    )
+    def test_transient_signatures_are_retryable(self, stderr):
+        assert pr_labeler._is_retryable_gh_error(stderr) is True
+
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "gh: Not Found (HTTP 404)",
+            # A 404 whose message carries a number containing "504" must not be
+            # mistaken for a transient 5xx: signatures anchor to "HTTP 50x".
+            "gh: Not Found (HTTP 404) for pull request 5041",
+            "could not resolve to a Repository with the name",
+            # Primary rate limits reset minutes out and cannot recover within
+            # the short retry budget, so they fail fast (only secondary do).
+            "API rate limit exceeded for user ID 1",
+            "",
+        ],
+    )
+    def test_non_transient_signatures_are_not_retryable(self, stderr):
+        assert pr_labeler._is_retryable_gh_error(stderr) is False
+
+
+# ---- gh() retry -------------------------------------------------------------
+
+
+def _completed(returncode, stdout="", stderr=""):
+    return subprocess.CompletedProcess(
+        args=["gh", "x"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
+
+
+class TestGhRetry:
+    def test_retries_transient_then_succeeds(self, monkeypatch):
+        results = [
+            _completed(1, stderr="gh: HTTP 504"),
+            _completed(1, stderr="request timed out"),
+            _completed(0, stdout="ok"),
+        ]
+        calls = {"n": 0}
+
+        def fake_run(*args, **kwargs):
+            calls["n"] += 1
+            return results.pop(0)
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(pr_labeler.subprocess, "run", fake_run)
+        monkeypatch.setattr(pr_labeler.time, "sleep", lambda s: sleeps.append(s))
+
+        result = pr_labeler.gh(["api", "x"])
+        assert result.stdout == "ok"
+        assert calls["n"] == 3
+        assert len(sleeps) == 2
+
+    def test_non_retryable_fails_fast(self, monkeypatch):
+        calls = {"n": 0}
+
+        def fake_run(*args, **kwargs):
+            calls["n"] += 1
+            return _completed(1, stderr="gh: Not Found (HTTP 404)")
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(pr_labeler.subprocess, "run", fake_run)
+        monkeypatch.setattr(pr_labeler.time, "sleep", lambda s: sleeps.append(s))
+
+        with pytest.raises(subprocess.CalledProcessError):
+            pr_labeler.gh(["api", "x"])
+        assert calls["n"] == 1
+        assert sleeps == []
+
+    def test_non_retryable_returns_when_check_false(self, monkeypatch):
+        monkeypatch.setattr(
+            pr_labeler.subprocess,
+            "run",
+            lambda *a, **k: _completed(1, stderr="gh: Not Found (HTTP 404)"),
+        )
+        result = pr_labeler.gh(["api", "x"], check=False)
+        assert result.returncode == 1
+
+    def test_exhausts_retries_then_raises(self, monkeypatch):
+        calls = {"n": 0}
+
+        def fake_run(*args, **kwargs):
+            calls["n"] += 1
+            return _completed(1, stderr="gh: HTTP 504")
+
+        sleeps: list[float] = []
+        monkeypatch.setattr(pr_labeler.subprocess, "run", fake_run)
+        monkeypatch.setattr(pr_labeler.time, "sleep", lambda s: sleeps.append(s))
+
+        with pytest.raises(subprocess.CalledProcessError):
+            pr_labeler.gh(["api", "x"])
+        assert calls["n"] == pr_labeler.GH_MAX_ATTEMPTS
+        assert len(sleeps) == pr_labeler.GH_MAX_ATTEMPTS - 1
+
+
+# ---- main() failure-rate floor ----------------------------------------------
+
+
+def _ok_pr(number):
+    return {
+        "number": number,
+        "state": "OPEN",
+        "additions": 1,
+        "deletions": 0,
+        "body": "",
+        "labels": [],
+        "files": [],
+    }
+
+
+class TestMainFailureFloor:
+    def _setup_env(self, monkeypatch):
+        monkeypatch.setenv("GITHUB_REPOSITORY", "org/repo")
+        monkeypatch.setenv("PR_NUMBER", "all")
+        monkeypatch.setenv("DRY_RUN", "true")
+        monkeypatch.setenv("EVENT_PR_NUMBER", "")
+        # body mode + no CODEOWNERS keeps every real gh() call out of the path.
+        monkeypatch.setenv("REASONS_TARGET", "body")
+        monkeypatch.setattr(pr_labeler, "fetch_codeowners", lambda repo: None)
+
+    def test_single_failure_does_not_fail_run(self, monkeypatch):
+        self._setup_env(monkeypatch)
+        monkeypatch.setattr(pr_labeler, "determine_targets", lambda *a: [1])
+
+        def boom(repo, pr_number):
+            raise subprocess.CalledProcessError(1, ["gh"], "", "gh: HTTP 504")
+
+        monkeypatch.setattr(pr_labeler, "fetch_pr", boom)
+        assert pr_labeler.main() == 0
+
+    def test_enough_failures_fail_run(self, monkeypatch):
+        self._setup_env(monkeypatch)
+        targets = list(range(1, 11))  # 10 PRs
+        monkeypatch.setattr(pr_labeler, "determine_targets", lambda *a: targets)
+
+        # Fail 3 of 10: 3 >= floor of 2 and 30% > 10%, so the run fails.
+        def maybe_boom(repo, pr_number):
+            if pr_number <= 3:
+                raise subprocess.CalledProcessError(1, ["gh"], "", "gh: HTTP 504")
+            return _ok_pr(pr_number)
+
+        monkeypatch.setattr(pr_labeler, "fetch_pr", maybe_boom)
+        assert pr_labeler.main() == 1
