@@ -535,10 +535,40 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
             "--repo",
             repo,
             "--json",
-            "number,additions,deletions,body,labels,state,files",
+            "number,additions,deletions,body,labels,state,files,headRefOid",
         ]
     )
     return json.loads(result.stdout)
+
+
+def fetch_pr_inputs(repo: str, pr_number: int) -> dict:
+    """Re-read only the fields a labeling decision is derived from."""
+    result = gh(
+        ["pr", "view", str(pr_number), "--repo", repo, "--json", "body,headRefOid"]
+    )
+    return json.loads(result.stdout)
+
+
+def is_superseded(repo: str, pr_number: int, snapshot: dict) -> bool:
+    """Report whether the PR's inputs moved since ``snapshot`` was taken.
+
+    Runs that overlap on one PR have to converge on the newest view of it. The
+    caller workflow used to get that from ``cancel-in-progress``, which kills
+    the older run and leaves a cancelled check run on the head commit; Renovate
+    reads every check run without discarding superseded ones
+    (renovatebot/renovate#36837), sees a red branch status, and silently
+    declines to automerge. Standing down here gives the same last-writer-wins
+    ordering while the run still finishes green.
+
+    Only the inputs are compared: the body, which decides the risk and template
+    labels, and the head sha, which decides size and domain. Writing labels or
+    the sticky comment changes neither, so a run whose inputs held still always
+    proceeds -- the newest run cannot be starved by the ones it superseded.
+    """
+    current = fetch_pr_inputs(repo, pr_number)
+    body_moved = (current.get("body") or "") != (snapshot.get("body") or "")
+    head_moved = current.get("headRefOid") != snapshot.get("headRefOid")
+    return body_moved or head_moved
 
 
 def fetch_pr_comments(repo: str, pr_number: int) -> list[dict]:
@@ -916,6 +946,12 @@ def main() -> int:
                 domain_slugs = set(reasons)
 
             reconcile(pr, plan=plan, domain_slugs=domain_slugs)
+
+            # A dry run writes nothing, so it has nothing to stand down from.
+            if not dry_run and is_superseded(repo, pr_number, pr):
+                print(f"PR #{pr_number} (skip: superseded by a newer run)")
+                continue
+
             apply(repo, plan, dry_run)
 
             # Publish the domain-reason section (independent of labels so it and

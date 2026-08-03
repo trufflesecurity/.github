@@ -938,6 +938,41 @@ class TestPlanCommentAction:
         assert "removed" in note
 
 
+# ---- supersede guard --------------------------------------------------------
+
+
+class TestIsSuperseded:
+    SNAPSHOT = {"body": "original body", "headRefOid": "abc123"}
+
+    def _current(self, monkeypatch, body, sha):
+        monkeypatch.setattr(
+            pr_labeler,
+            "fetch_pr_inputs",
+            lambda repo, pr_number: {"body": body, "headRefOid": sha},
+        )
+
+    def test_unchanged_inputs_proceed(self, monkeypatch):
+        self._current(monkeypatch, "original body", "abc123")
+        assert pr_labeler.is_superseded("org/repo", 1, self.SNAPSHOT) is False
+
+    def test_edited_body_stands_down(self, monkeypatch):
+        # The checkbox case: a newer run already read the toggled body, so this
+        # run must not apply removals it computed from the stale one.
+        self._current(monkeypatch, "urgent now ticked", "abc123")
+        assert pr_labeler.is_superseded("org/repo", 1, self.SNAPSHOT) is True
+
+    def test_new_head_commit_stands_down(self, monkeypatch):
+        self._current(monkeypatch, "original body", "def456")
+        assert pr_labeler.is_superseded("org/repo", 1, self.SNAPSHOT) is True
+
+    def test_absent_and_empty_body_are_the_same_input(self, monkeypatch):
+        # `gh` returns null for an empty description; that must not read as a
+        # change and strand every run.
+        self._current(monkeypatch, None, "abc123")
+        snapshot = {"body": "", "headRefOid": "abc123"}
+        assert pr_labeler.is_superseded("org/repo", 1, snapshot) is False
+
+
 # ---- _is_retryable_gh_error -------------------------------------------------
 
 
