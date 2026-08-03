@@ -535,10 +535,40 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
             "--repo",
             repo,
             "--json",
-            "number,additions,deletions,body,labels,state,files",
+            "number,additions,deletions,body,labels,state,files,headRefOid",
         ]
     )
     return json.loads(result.stdout)
+
+
+def fetch_pr_inputs(repo: str, pr_number: int) -> dict:
+    """Re-read only the fields a labeling decision is derived from."""
+    result = gh(
+        ["pr", "view", str(pr_number), "--repo", repo, "--json", "body,headRefOid"]
+    )
+    return json.loads(result.stdout)
+
+
+def is_superseded(repo: str, pr_number: int, snapshot: dict) -> bool:
+    """Report whether the PR's inputs moved since ``snapshot`` was taken.
+
+    Runs that overlap on one PR have to converge on the newest view of it. The
+    caller workflow used to get that from ``cancel-in-progress``, which kills
+    the older run and leaves a cancelled check run on the head commit; Renovate
+    reads every check run without discarding superseded ones
+    (renovatebot/renovate#36837), sees a red branch status, and silently
+    declines to automerge. Standing down here gives the same last-writer-wins
+    ordering while the run still finishes green.
+
+    Only the inputs are compared: the body, which decides the risk and template
+    labels, and the head sha, which decides size and domain. Writing labels or
+    the sticky comment changes neither, so a run whose inputs held still always
+    proceeds -- the newest run cannot be starved by the ones it superseded.
+    """
+    current = fetch_pr_inputs(repo, pr_number)
+    body_moved = (current.get("body") or "") != (snapshot.get("body") or "")
+    head_moved = current.get("headRefOid") != snapshot.get("headRefOid")
+    return body_moved or head_moved
 
 
 def fetch_pr_comments(repo: str, pr_number: int) -> list[dict]:
@@ -728,14 +758,26 @@ def _normalize(text: str) -> str:
     return text.replace("\r\n", "\n").strip()
 
 
+def find_reasons_comments(
+    comments: list[dict], marker: str = DOMAIN_REASONS_START
+) -> list[dict]:
+    """Return every sticky comment carrying ``marker``, lowest id first.
+
+    More than one can exist: two labeler runs overlapping on the same PR can
+    both observe "no comment yet" and both create one. Ordering by id gives
+    every run the same answer for which copy is the original, so they can agree
+    on a survivor without coordinating.
+    """
+    matches = [c for c in comments if marker in (c.get("body") or "")]
+    return sorted(matches, key=lambda c: c["id"])
+
+
 def find_reasons_comment(
     comments: list[dict], marker: str = DOMAIN_REASONS_START
 ) -> dict | None:
-    """Return our sticky comment (the one carrying ``marker``), or ``None``."""
-    for comment in comments:
-        if marker in (comment.get("body") or ""):
-            return comment
-    return None
+    """Return the surviving sticky comment, or ``None`` when there is none."""
+    matches = find_reasons_comments(comments, marker)
+    return matches[0] if matches else None
 
 
 def plan_comment_action(section: str, existing: dict | None) -> tuple[str, str] | None:
@@ -799,6 +841,37 @@ def apply_comment(
                 f"repos/{repo}/issues/comments/{existing_id}",
             ]
         )
+
+
+def prune_duplicate_reasons_comments(
+    repo: str,
+    pr_number: int,
+    comments: list[dict],
+    dry_run: bool,
+    marker: str = DOMAIN_REASONS_START,
+) -> int:
+    """Delete every sticky comment but the lowest-id one; return how many.
+
+    Overlapping runs can each create a copy, and only the survivor is ever
+    updated afterwards, so an unpruned duplicate would sit on the PR forever.
+    Because the survivor is chosen by lowest id rather than by who got here
+    first, two runs pruning at once pick the same one and converge instead of
+    deleting each other's. ``check`` is off so losing that race -- the other run
+    already deleted the copy, giving a 404 -- is not treated as a failure.
+    """
+    duplicates = find_reasons_comments(comments, marker)[1:]
+    if not dry_run:
+        for comment in duplicates:
+            gh(
+                [
+                    "api",
+                    "--method",
+                    "DELETE",
+                    f"repos/{repo}/issues/comments/{comment['id']}",
+                ],
+                check=False,
+            )
+    return len(duplicates)
 
 
 def determine_targets(repo: str, pr_number_input: str, event_pr: str) -> list[int]:
@@ -873,6 +946,12 @@ def main() -> int:
                 domain_slugs = set(reasons)
 
             reconcile(pr, plan=plan, domain_slugs=domain_slugs)
+
+            # A dry run writes nothing, so it has nothing to stand down from.
+            if not dry_run and is_superseded(repo, pr_number, pr):
+                print(f"PR #{pr_number} (skip: superseded by a newer run)")
+                continue
+
             apply(repo, plan, dry_run)
 
             # Publish the domain-reason section (independent of labels so it and
@@ -886,6 +965,9 @@ def main() -> int:
             )
             if reasons_target == REASONS_TARGET_COMMENT:
                 comments = fetch_pr_comments(repo, pr_number)
+                pruned = prune_duplicate_reasons_comments(
+                    repo, pr_number, comments, dry_run
+                )
                 existing = find_reasons_comment(comments)
                 action = plan_comment_action(section, existing)
                 if action is not None:
@@ -893,6 +975,18 @@ def main() -> int:
                     plan.notes.append(note)
                     existing_id = existing["id"] if existing else None
                     apply_comment(repo, pr_number, verb, section, existing_id, dry_run)
+                    if verb == "create" and not dry_run:
+                        # A run overlapping ours may have created its own copy
+                        # after the fetch above, so settle it against fresh
+                        # data. A dry run created nothing to settle.
+                        pruned += prune_duplicate_reasons_comments(
+                            repo,
+                            pr_number,
+                            fetch_pr_comments(repo, pr_number),
+                            dry_run,
+                        )
+                if pruned:
+                    plan.notes.append(f"[comment: pruned {pruned} duplicate(s)]")
             else:
                 old_body = pr.get("body") or ""
                 new_body = upsert_managed_section(
