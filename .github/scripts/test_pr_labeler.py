@@ -832,6 +832,79 @@ class TestFindReasonsComment:
         comments = [{"id": 1, "body": None}, {"id": 2, "body": f"{START}\nx\n{END}"}]
         assert pr_labeler.find_reasons_comment(comments)["id"] == 2
 
+    def test_survivor_is_lowest_id_whatever_the_listing_order(self):
+        # Two racing runs must agree on which copy is the original, or each
+        # deletes the other's and the PR ends up with none.
+        forward = [{"id": 9, "body": _section()}, {"id": 3, "body": _section()}]
+        assert pr_labeler.find_reasons_comment(forward)["id"] == 3
+        assert pr_labeler.find_reasons_comment(list(reversed(forward)))["id"] == 3
+
+
+class TestFindReasonsComments:
+    def test_returns_every_copy_lowest_id_first(self):
+        comments = [
+            {"id": 7, "body": _section("second copy")},
+            {"id": 2, "body": "unrelated review comment"},
+            {"id": 4, "body": _section("first copy")},
+        ]
+        assert [c["id"] for c in pr_labeler.find_reasons_comments(comments)] == [4, 7]
+
+    def test_empty_when_no_copy_exists(self):
+        assert pr_labeler.find_reasons_comments([{"id": 1, "body": "nope"}]) == []
+
+
+class TestPruneDuplicateReasonsComments:
+    def _stub_gh(self, monkeypatch):
+        calls = []
+
+        def fake_gh(args, check=True):
+            calls.append({"args": args, "check": check})
+            return pr_labeler.subprocess.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(pr_labeler, "gh", fake_gh)
+        return calls
+
+    def test_deletes_every_copy_but_the_lowest_id(self, monkeypatch):
+        calls = self._stub_gh(monkeypatch)
+        comments = [
+            {"id": 3, "body": _section()},
+            {"id": 8, "body": _section()},
+            {"id": 11, "body": _section()},
+        ]
+        assert (
+            pr_labeler.prune_duplicate_reasons_comments("org/repo", 1, comments, False)
+            == 2
+        )
+        deleted = [c["args"][-1] for c in calls]
+        assert deleted == [
+            "repos/org/repo/issues/comments/8",
+            "repos/org/repo/issues/comments/11",
+        ]
+
+    def test_single_copy_is_left_alone(self, monkeypatch):
+        calls = self._stub_gh(monkeypatch)
+        comments = [{"id": 3, "body": _section()}, {"id": 4, "body": "unrelated"}]
+        assert (
+            pr_labeler.prune_duplicate_reasons_comments("org/repo", 1, comments, False)
+            == 0
+        )
+        assert calls == []
+
+    def test_delete_tolerates_a_copy_another_run_already_removed(self, monkeypatch):
+        calls = self._stub_gh(monkeypatch)
+        comments = [{"id": 3, "body": _section()}, {"id": 8, "body": _section()}]
+        pr_labeler.prune_duplicate_reasons_comments("org/repo", 1, comments, False)
+        assert all(call["check"] is False for call in calls)
+
+    def test_dry_run_counts_without_deleting(self, monkeypatch):
+        calls = self._stub_gh(monkeypatch)
+        comments = [{"id": 3, "body": _section()}, {"id": 8, "body": _section()}]
+        assert (
+            pr_labeler.prune_duplicate_reasons_comments("org/repo", 1, comments, True)
+            == 1
+        )
+        assert calls == []
+
 
 class TestPlanCommentAction:
     def test_create_when_none_and_section(self):
