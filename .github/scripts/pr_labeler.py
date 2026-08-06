@@ -109,6 +109,22 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
 # Max files listed per team before truncating with an "...and N more" line.
 DOMAIN_REASON_FILE_CAP = 10
 
+# `gh pr view --json files` reads a GraphQL connection that gh requests with
+# `first: 100` and never pages, so a PR touching more files hands back a
+# silently truncated list -- no warning, no total count. Domain labeling is the
+# only consumer that cares, and truncation is not a harmless approximation
+# there: CODEOWNERS is last-match-wins, and the ownerless `go.mod`/`go.sum`/
+# `/vendor/` rules that let Renovate automerge sort near the end of the file, so
+# a large dependency bump fills the whole window with unowned vendor churn and
+# buries the handful of first-party paths a team actually owns. The PR then
+# looks entirely unowned: no domain/* labels and no reason comment, even while
+# GitHub itself requests the owning teams as reviewers.
+#
+# A list exactly this long is the only available signal that more may follow, so
+# it triggers a full re-fetch. Anything shorter is provably complete and keeps
+# the single-call fast path (~98% of open PRs in practice).
+GH_PR_VIEW_FILE_CAP = 100
+
 # Where to publish the reason section. "comment" (the default) maintains a
 # single sticky PR comment (one notification when first created, silent edits
 # after); "body" edits a managed region of the PR description (quiet, no
@@ -541,6 +557,67 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     return json.loads(result.stdout)
 
 
+# Paths only, and paged. The REST equivalent (repos/{repo}/pulls/{n}/files)
+# embeds the full patch hunk for every file with no way to project it away:
+# measured against a 351-file dependency bump it transfers ~1.8MB to learn 351
+# strings, where this query costs ~25KB. `--paginate` drives it off pageInfo,
+# so `$endCursor` and the pageInfo selection are load-bearing for gh, not
+# decoration. GitHub stops the connection at 3000 files, the same ceiling the
+# REST endpoint and the PR "Files changed" tab enforce, so beyond that no API
+# reports the tail and domain labels are best-effort.
+PR_FILES_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      files(first: 100, after: $endCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { path }
+      }
+    }
+  }
+}
+"""
+
+
+def fetch_pr_file_paths(repo: str, pr_number: int) -> list[str]:
+    """Return every changed path for a PR, paging past gh's 100-file window."""
+    owner, name = repo.split("/", 1)
+    result = gh(
+        [
+            "api",
+            "graphql",
+            "--paginate",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"name={name}",
+            "-F",
+            f"number={pr_number}",
+            "-f",
+            f"query={PR_FILES_QUERY}",
+            "--jq",
+            ".data.repository.pullRequest.files.nodes[].path",
+        ]
+    )
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def pr_changed_files(repo: str, pr_number: int, pr: dict) -> list[str]:
+    """Return the PR's changed paths, re-fetching when they may be truncated.
+
+    Prefers the list already embedded in the ``fetch_pr`` payload and only
+    spends a second API call when that list is long enough to be suspect -- see
+    GH_PR_VIEW_FILE_CAP for why a truncated list silently breaks domain
+    labeling rather than merely degrading it.
+    """
+    files = [f["path"] for f in pr.get("files", [])]
+    if len(files) < GH_PR_VIEW_FILE_CAP:
+        return files
+    files = fetch_pr_file_paths(repo, pr_number)
+    print(f"PR #{pr_number} (paged {len(files)} changed files past gh's cap)")
+    return files
+
+
 def fetch_pr_inputs(repo: str, pr_number: int) -> dict:
     """Re-read only the fields a labeling decision is derived from."""
     result = gh(
@@ -941,7 +1018,7 @@ def main() -> int:
             domain_slugs: set[str] | None = None
             reasons: dict[str, list[tuple[str, str]]] = {}
             if codeowners_rules is not None:
-                files = [f["path"] for f in pr.get("files", [])]
+                files = pr_changed_files(repo, pr_number, pr)
                 reasons = domain_reasons(codeowners_rules, files)
                 domain_slugs = set(reasons)
 
