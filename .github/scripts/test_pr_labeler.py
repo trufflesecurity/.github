@@ -941,6 +941,88 @@ class TestPlanCommentAction:
 # ---- supersede guard --------------------------------------------------------
 
 
+class TestPrChangedFiles:
+    """The 100-file window in `gh pr view --json files` must not reach CODEOWNERS.
+
+    Truncation is silent, so these pin the tripwire in both directions: a short
+    list must not provoke a second API call, and a capped one must be replaced
+    wholesale rather than merged with the partial view.
+    """
+
+    def _stub_paged(self, monkeypatch, paths):
+        calls = []
+
+        def fake_fetch(repo, pr_number):
+            calls.append((repo, pr_number))
+            return paths
+
+        monkeypatch.setattr(pr_labeler, "fetch_pr_file_paths", fake_fetch)
+        return calls
+
+    @staticmethod
+    def _pr(count):
+        return {"files": [{"path": f"vendor/a/f{i}.go"} for i in range(count)]}
+
+    def test_short_list_is_trusted_without_a_second_call(self, monkeypatch):
+        calls = self._stub_paged(monkeypatch, ["never/used.go"])
+        files = pr_labeler.pr_changed_files("org/repo", 1, self._pr(6))
+        assert len(files) == 6
+        assert calls == []
+
+    def test_one_under_the_cap_still_takes_the_fast_path(self, monkeypatch):
+        calls = self._stub_paged(monkeypatch, ["never/used.go"])
+        assert len(pr_labeler.pr_changed_files("org/repo", 1, self._pr(99))) == 99
+        assert calls == []
+
+    def test_capped_list_is_refetched_in_full(self, monkeypatch):
+        # The regression: a Renovate bump whose only owned path sorts past the
+        # window. The fast path would report zero owners for the whole PR.
+        full = [f"vendor/a/f{i}.go" for i in range(100)] + ["src/owned.go"]
+        calls = self._stub_paged(monkeypatch, full)
+        files = pr_labeler.pr_changed_files("org/repo", 7041, self._pr(100))
+        assert files == full
+        assert calls == [("org/repo", 7041)]
+
+    def test_missing_files_key_is_not_an_error(self, monkeypatch):
+        calls = self._stub_paged(monkeypatch, ["never/used.go"])
+        assert pr_labeler.pr_changed_files("org/repo", 1, {}) == []
+        assert calls == []
+
+
+class TestFetchPrFilePaths:
+    def _stub_gh(self, monkeypatch, stdout):
+        calls = []
+
+        def fake_gh(args, check=True):
+            calls.append(args)
+            return pr_labeler.subprocess.CompletedProcess(args, 0, stdout, "")
+
+        monkeypatch.setattr(pr_labeler, "gh", fake_gh)
+        return calls
+
+    def test_splits_owner_and_repo_into_query_variables(self, monkeypatch):
+        calls = self._stub_gh(monkeypatch, "a.go\nb.go\n")
+        assert pr_labeler.fetch_pr_file_paths("trufflesecurity/thog", 7041) == [
+            "a.go",
+            "b.go",
+        ]
+        args = calls[0]
+        assert "--paginate" in args
+        assert "owner=trufflesecurity" in args
+        assert "name=thog" in args
+        assert "number=7041" in args
+
+    def test_pagination_contract_is_present_in_the_query(self):
+        # gh drives --paginate off these two fields; losing either silently
+        # returns only the first page and reintroduces the truncation bug.
+        assert "$endCursor" in pr_labeler.PR_FILES_QUERY
+        assert "hasNextPage" in pr_labeler.PR_FILES_QUERY
+
+    def test_blank_lines_are_dropped(self, monkeypatch):
+        self._stub_gh(monkeypatch, "a.go\n\nb.go\n\n")
+        assert pr_labeler.fetch_pr_file_paths("org/repo", 1) == ["a.go", "b.go"]
+
+
 class TestIsSuperseded:
     SNAPSHOT = {"body": "original body", "headRefOid": "abc123"}
 
