@@ -54,3 +54,9 @@
 - name: domain/database
   color: 115e59
   description: PR touches code owned by Database
+# Predates this file. Dependabot created it per-repo, so repos that never ran
+# Dependabot have it in GitHub's default gray instead. Listed here to settle on
+# one color; the blue is Dependabot's own, kept because most repos already show it.
+- name: dependencies
+  color: 0366d6
+  description: Pull requests that update a dependency file
