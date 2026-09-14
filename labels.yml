@@ -54,9 +54,21 @@
 - name: domain/database
   color: 115e59
   description: PR touches code owned by Database
-# Predates this file. Dependabot created it per-repo, so repos that never ran
-# Dependabot have it in GitHub's default gray instead. Listed here to settle on
-# one color; the blue is Dependabot's own, kept because most repos already show it.
+# The two labels below are applied by the shared Renovate preset
+# (renovate-config.json), not by the pr-labeler, and both predate this file.
+#
+# Dependabot created `dependencies` per-repo before the Renovate migration, so
+# repos that never ran Dependabot have it in GitHub's default gray instead.
+# Listed here to settle on one color; the blue is Dependabot's own, kept
+# because most repos already show it.
 - name: dependencies
   color: 0366d6
   description: Pull requests that update a dependency file
+# `security` comes from the preset's vulnerabilityAlerts block, so it is only
+# created once a repo's first vulnerability-remediation PR applies it. Repos
+# with no manifest in a GitHub Advisory Database ecosystem (the Terraform and
+# deployment repos) never get one and so never had the label. Listed here so it
+# exists everywhere up front rather than appearing mid-incident.
+- name: security
+  color: ededed
+  description: PR remediates a security vulnerability
