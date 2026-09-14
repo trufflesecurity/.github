@@ -54,3 +54,9 @@
 - name: domain/database
   color: 115e59
   description: PR touches code owned by Database
+- name: dependencies
+  color: 0366d6
+  description: Pull requests that update a dependency file
+- name: security
+  color: ee0701
+  description: Pull requests that address a security vulnerability
