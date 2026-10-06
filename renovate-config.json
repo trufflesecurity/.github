@@ -19,6 +19,11 @@
     "automerge": true,
     "minimumReleaseAge": null
   },
+  "osvVulnerabilityAlerts": true,
+  "description": [
+    "osvVulnerabilityAlerts adds osv.dev as a second source of vulnerability alerts alongside Renovate's default, the Dependabot feed backed by the GitHub Advisory Database. That feed misses Go advisories two ways: some exist only in the Go vulnerability database with no GHSA for Dependabot to match, and others carry a GHSA whose affected ranges do not cover the release that is actually shipping. osv.dev serves the Go database directly, so both reach us.",
+    "Renovate documents OSV alerts as covering direct dependencies only, and the gomod manager separately disables requires carrying an // indirect comment, so indirect Go requires are not covered here. OSV-sourced alerts also cannot be configured apart from GitHub-sourced ones: Renovate's OSV path sets the same isVulnerabilityAlert flag and force-applies the vulnerabilityAlerts block above, so the automerge and cooldown exemption there govern both sources. Still experimental upstream (renovatebot/renovate#20542)."
+  ],
   "lockFileMaintenance": {
     "enabled": true,
     "automerge": true,
@@ -43,9 +48,10 @@
       "minimumReleaseAge": null
     },
     {
-      "description": "Don't apply the release-age cooldown to lock file maintenance. A lockfile refresh is carried out by the package manager rather than resolved from one upstream release, so there is no timestamp for minimumReleaseAge to evaluate. Under Renovate's timestamp-required default, a missing timestamp reads as 'not old enough', so renovate/stability-days pins to pending permanently and never clears on a rebase. That silently defeats the lockFileMaintenance automerge configured above, because automerge waits on a check that cannot pass. Kept as its own rule rather than folded into the pin/digest exemption because the rationale differs and is permanent: pins and digests lack a reliable timestamp, whereas lock file maintenance has none by design and always will. Deliberately not scoped by datasource, unlike Renovate's npm-only security:minimumReleaseAgeNpm preset, because this preset applies minimumReleaseAge to every ecosystem and none of them carry a lock-file-maintenance timestamp.",
+      "description": "Don't apply the release-age cooldown to lock file maintenance. A lockfile refresh is carried out by the package manager rather than resolved from one upstream release, so there is no timestamp for minimumReleaseAge to evaluate. Under Renovate's timestamp-required default, a missing timestamp reads as 'not old enough', so renovate/stability-days pins to pending permanently and never clears on a rebase. That silently defeats the lockFileMaintenance automerge configured above, because automerge waits on a check that cannot pass. Kept as its own rule rather than folded into the pin/digest exemption because the rationale differs and is permanent: pins and digests lack a reliable timestamp, whereas lock file maintenance has none by design and always will. Deliberately not scoped by datasource, unlike Renovate's npm-only security:minimumReleaseAgeNpm preset, because this preset applies minimumReleaseAge to every ecosystem and none of them carry a lock-file-maintenance timestamp. prPriority is raised above the default for the same reason the cooldown is waived: at the default 0 a refresh sorts behind every queued update and in a deep rate-limited queue is never created at all.",
       "matchUpdateTypes": ["lockFileMaintenance"],
       "minimumReleaseAge": null,
+      "prPriority": 1,
       "prBodyNotes": [
         "⚠️ Renovate did not validate release age for the packages in this PR. Lock file maintenance hands resolution to the package manager, and neither Yarn nor Go runs a release-age check of its own, so a freshly published version can land here with no cooldown. CI and whatever supply-chain scanning this repo runs are the only gates.",
         "ℹ️ This refresh re-resolves every dependency within the ranges already declared in the manifests. Where a range is loose (a caret on an npm direct dependency), a direct dependency can move a minor version in this PR without ever appearing as a version upgrade."
