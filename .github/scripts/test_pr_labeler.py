@@ -1008,9 +1008,15 @@ class TestFetchPrFilePaths:
         ]
         args = calls[0]
         assert "--paginate" in args
-        assert "owner=trufflesecurity" in args
-        assert "name=thog" in args
-        assert "number=7041" in args
+
+        def flag_for(value):
+            return args[args.index(value) - 1]
+
+        # -F would coerce an all-digit owner or repo name to an Int and fail the
+        # String! variable; the PR number must be typed, so it keeps -F.
+        assert flag_for("owner=trufflesecurity") == "-f"
+        assert flag_for("name=thog") == "-f"
+        assert flag_for("number=7041") == "-F"
 
     def test_pagination_contract_is_present_in_the_query(self):
         # gh drives --paginate off these two fields; losing either silently
